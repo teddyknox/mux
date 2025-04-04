@@ -49,11 +49,12 @@ def load_profiles_from_files(profiles_dir: Path) -> Dict[str, Dict]:
     return profiles
 
 
-def load_profiles_from_yaml(yaml_file: Path) -> Dict[str, Dict]:
-    """Loads profiles from a profiles.yaml file."""
-    profiles = {}
+def load_profiles_from_yaml(yaml_file: Path) -> Optional[Dict[str, Dict]]:
+    """Loads profiles from a profiles.yaml file. Returns None if file not found."""
     if not yaml_file.is_file():
-        return profiles
+        # return profiles # Old: returned {} incorrectly
+        return None
+    profiles = {}
     try:
         with yaml_file.open('r') as f:
             data = yaml.safe_load(f)
@@ -75,106 +76,114 @@ def load_profiles_from_yaml(yaml_file: Path) -> Dict[str, Dict]:
     return profiles
 
 
-def load_profiles_from_script(script_file: Path, parent_profile: Optional[str] = None) -> Dict[str, Dict]:
-    """Loads profiles by executing a profiles.py script."""
-    profiles = {}
-    if not script_file.is_file() or not os.access(script_file, os.X_OK):
-        if script_file.is_file():
-             print_warning(f"Profile script '{script_file}' is not executable. Skipping.")
-        return profiles
+def load_profiles_from_script(script_path: Path, parent_profile: Optional[str] = None) -> Optional[Dict[str, Dict[str, str]]]:
+    """Executes a profiles.py script and parses its JSON output."""
+    if not script_path.is_file():
+        return None
 
-    cmd = [str(script_file)]
-    # Pass parent profile as first argument if provided (as per original design idea)
-    # Note: This relies on the script expecting this argument.
+    command = [sys.executable, script_path]
     if parent_profile:
-        cmd.append(parent_profile)
+        command.append(parent_profile)
         
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=5) # Added timeout
+        # Use sys.executable to ensure the script is run with Python
+        result = subprocess.run(
+            command, 
+            capture_output=True, 
+            text=True, 
+            check=False, # Don't raise exception on non-zero exit code
+            timeout=5 # Add a timeout for safety
+        )
+
+        if result.returncode != 0:
+            # print_warning(f"Warning: Error executing profile script {script_path}") # Old warning
+            print_warning(f"Profile script \n'{script_path}' failed (exit code\n{result.returncode}):\nStderr:\n{result.stderr.strip()}\n")
+            return None
+
         try:
-            data = json.loads(result.stdout)
-            if not isinstance(data, dict):
-                 raise InvalidConfigError("Script output must be a JSON dictionary (mapping profile names to env vars)", str(script_file))
-             # Basic validation: ensure values are dictionaries and content are strings
-            for name, env_vars in data.items():
+            profiles = json.loads(result.stdout)
+            if not isinstance(profiles, dict):
+                # print_warning(f"Warning: Invalid JSON structure from {script_path}") # Old warning
+                print_warning(f"Configuration error in profile script \n'{script_path}': Script output\nmust be a JSON dictionary (mapping profile names to env vars)")
+                return None
+            # Basic validation of inner structure (optional but good)
+            for name, env_vars in profiles.items():
                 if not isinstance(env_vars, dict):
-                     raise InvalidConfigError(f"Value for profile '{name}' in script output must be a dictionary of environment variables", str(script_file))
-                profiles[name] = {str(k): str(v) for k, v in env_vars.items()}
+                     print_warning(f"Configuration error in profile script \n'{script_path}': Value for profile '{name}' must be a dictionary of env vars.")
+                     return None # Or skip this profile?
+            return profiles
         except json.JSONDecodeError as e:
-            raise InvalidConfigError(f"Error decoding JSON from script: {e}\nOutput:\n{result.stdout}", str(script_file))
+            # print_warning(f"Warning: Could not parse JSON output from {script_path}") # Old warning
+            print_warning(f"Configuration error in profile script \n'{script_path}': Error \ndecoding JSON from script: {e}\nOutput:\n{result.stdout.strip()}\n")
+            return None
 
     except FileNotFoundError:
-        # Should not happen if is_file() and access() passed, but defensive
-        print_warning(f"Profile script '{script_file}' not found during execution. Skipping.")
-    except subprocess.CalledProcessError as e:
-        print_warning(f"Profile script '{script_file}' failed (exit code {e.returncode}):\nStderr:\n{e.stderr}")
+        # This shouldn't happen if script_path.is_file() passed, but handle defensively
+        print_warning(f"Profile script '{script_path}' not found.")
+        return None
     except subprocess.TimeoutExpired:
-        print_warning(f"Profile script '{script_file}' timed out after 5 seconds. Skipping.")
-    except InvalidConfigError as e:
-        # Re-raise config errors specifically so tests can catch them
-        raise e
+        print_warning(f"Profile script '{script_path}' timed out after 5 seconds.")
+        return None
     except Exception as e:
-        # Catch other potential errors
-        print_warning(f"Error running profile script '{script_file}': {e}")
+        # Catch other potential errors during subprocess execution
+        print_warning(f"Error running profile script \n'{script_path}': {e}")
+        return None
 
-    return profiles
-
-def load_profiles_for_dimension(dim_path: Path, parent_dim: Optional[Any] = None) -> Dict[str, Dict]:
+def load_profiles_for_dimension(dim_path: Path, parent_profile: Optional[str] = None) -> Dict[str, Dict]:
     """
     Detects and loads profiles for a given dimension path using the first available method.
-    Order: files > yaml > script
+    Order: Dynamic (script) > YAML (profiles.yaml) > Manual (profiles/*.env)
     """
-    profiles = {}
+    profiles = None # Start with None to distinguish no source vs. empty source
     loaded_source = None # Track where profiles came from
 
-    # 1. Try loading from profiles/ directory
-    profiles_dir = dim_path / "profiles"
+    # 1. Try loading from profiles.py (Dynamic)
+    profiles_py = dim_path / "profiles.py"
     try:
-        profiles = load_profiles_from_files(profiles_dir)
-        if profiles:
-            loaded_source = "files"
-    except InvalidConfigError as e:
-         print_warning(f"Error loading profiles from directory '{profiles_dir}': {e}")
-         profiles = {} # Reset profiles on error
+        # load_profiles_from_script returns None on error, or a dict (possibly empty) on success
+        profiles = load_profiles_from_script(profiles_py, parent_profile)
+        if profiles is not None: # Check if script ran successfully (even if it returned {}) 
+            loaded_source = "script"
+    except Exception as e:
+        # Catch unexpected errors during script loading call itself
+        print_warning(f"Unexpected error loading profiles from script '{profiles_py}': {e}")
+        profiles = None # Reset on unexpected error
 
     # 2. If not loaded, try profiles.yaml
     profiles_yaml = dim_path / "profiles.yaml"
-    if not loaded_source:
+    if loaded_source is None: # Check if profiles is still None
         try:
             profiles = load_profiles_from_yaml(profiles_yaml)
-            if profiles:
+            if profiles is not None: # Check if YAML loaded successfully (even if empty)
                 loaded_source = "yaml"
         except InvalidConfigError as e:
              print_warning(f"Error loading profiles from YAML '{profiles_yaml}': {e}")
-             profiles = {} # Reset profiles on error
-
-    # 3. If not loaded, try profiles.py
-    profiles_py = dim_path / "profiles.py"
-    if not loaded_source:
-        parent_profile_name = None # TODO: Get parent profile name if needed and parent_dim exists
-        # If parent_dim and hasattr(parent_dim, 'get_active_profile_name'): # Example check
-        #     parent_profile_name = parent_dim.get_active_profile_name()
-        try:
-            profiles = load_profiles_from_script(profiles_py, parent_profile_name)
-            if profiles:
-                 loaded_source = "script"
-        except InvalidConfigError as e:
-             # Warnings are printed inside load_profiles_from_script for execution errors
-             # Re-raising here allows tests to catch config errors, but we still warn.
-             print_warning(f"Configuration error in profile script '{profiles_py}': {e}")
-             profiles = {} # Reset profiles on error
-             # Re-raise the error for testing/handling higher up?
-             # raise e 
+             profiles = None # Reset profiles on error
         except Exception as e:
-             # Catch unexpected errors during script loading call itself
-             print_warning(f"Unexpected error loading profiles from script '{profiles_py}': {e}")
-             profiles = {} # Reset profiles on error
+            print_warning(f"Unexpected error loading profiles from YAML '{profiles_yaml}': {e}")
+            profiles = None # Reset on unexpected error
+
+    # 3. If not loaded, try loading from profiles/ directory (Manual)
+    profiles_dir = dim_path / "profiles"
+    if loaded_source is None: # Check if profiles is still None
+        try:
+            profiles = load_profiles_from_files(profiles_dir)
+            if profiles is not None: # Check if files loaded successfully (even if empty)
+                loaded_source = "files"
+        except InvalidConfigError as e:
+            print_warning(f"Error loading profiles from directory '{profiles_dir}': {e}")
+            profiles = None # Reset profiles on error
+        except Exception as e:
+            print_warning(f"Unexpected error loading profiles from directory '{profiles_dir}': {e}")
+            profiles = None # Reset on unexpected error
+
 
     # Optionally print info about which source was used
-    # if loaded_source:
-    #     print_info(f"Loaded profiles for '{dim_path.name}' from {loaded_source}.")
-    # elif not profiles_dir.exists() and not profiles_yaml.exists() and not profiles_py.exists():
-    #     print_info(f"No profile source found for dimension '{dim_path.name}'.")
+    if loaded_source:
+        print_warning(f"Loaded profiles for '{dim_path.name}' from {loaded_source}.")
+    elif not profiles_py.exists() and not profiles_yaml.exists() and not profiles_dir.exists():
+        print_warning(f"No profile source found for dimension '{dim_path.name}'.")
 
-    return profiles
+    # Return the loaded profiles dict, or an empty dict if no source was found/loaded
+    return profiles if profiles is not None else {}
 

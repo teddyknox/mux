@@ -14,247 +14,189 @@ from rich.tree import Tree
 
 from .core import Mux
 from .exceptions import MuxError, FzfNotInstalledError, DimensionNotFoundError, ProfileNotFoundError
-from .ui import print_error, print_success, print_warning
+from .ui import print_error, print_success, print_warning, display_show_table
 from .__version__ import __version__
+from .config import MUX_DIR, DIMS_DIR
+from .utils import ensure_mux_dir_exists
 
 # Mux internals
-from .dimension import Dimension, get_dimension_tree, find_dimensions
+from .dimension import get_dimension_tree, find_dimensions, Dimension
 from .state import (
     generate_activate_commands,
     generate_deactivate_commands,
-    get_profile_var_env_name,
     get_active_profile
 )
-from .utils import MUX_DIR_PATH, ensure_mux_dir_exists
 
 # Global console objects
 console = Console()
-console_err = Console(stderr=True, style="bold red") # Console for stderr
+console_err = Console(stderr=True)
 
 # --- Helper Functions ---
-
-def find_dimension(name: str, base_path: Path = MUX_DIR_PATH) -> Optional[Dimension]:
-    """Finds a dimension by name within a given base path."""
-    # Load dimensions relative to the provided base_path
-    all_dims = find_dimensions(base_path)
-    return all_dims.get(name) # Simpler lookup
-
-
-def print_shell_commands(commands: List[str]):
-    """Prints shell commands to stdout for the wrapper function to eval."""
-    # Ensure newline separation even if list is empty/single
-    if commands:
-        print("\n".join(commands))
 
 # --- Command Implementations ---
 
 def handle_status(args):
     """Implements the 'mux status' command."""
-    root_dims = get_dimension_tree(MUX_DIR_PATH)
+    root_dims = get_dimension_tree(DIMS_DIR)
     if not root_dims:
         console.print("[yellow]No dimensions found.[/yellow]")
         return
 
-    tree = Tree(
-        f"[bold cyan]Mux Status[/bold cyan] ([dim]{MUX_DIR_PATH}[/dim])",
-        guide_style="bold bright_blue"
-    )
-
-    def add_to_tree(dim: Dimension, parent_node: Tree):
-        active_profile = get_active_profile(dim.name) # Use state function
-        default_profile = dim.get_default_profile_name()
-        
-        label = Text(dim.name, style="bold white")
-        if active_profile:
-            label.append(" -> ")
-            label.append(active_profile, style="bold green")
-            if active_profile == default_profile:
-                label.append(" (default)", style="dim green")
-        elif default_profile:
-            label.append(f" (default: {default_profile})", style="dim yellow")
-        else:
-            label.append(" (no active/default)", style="dim red")
-            
-        node = parent_node.add(label)
-        for child in dim.children:
-            add_to_tree(child, node)
-
-    for dim in root_dims:
-        add_to_tree(dim, tree)
-        
-    console.print(tree)
+    # Pass args.verbose to Mux.handle_status method
+    mux = Mux()
+    mux.handle_status(verbose=args.verbose)
 
 def handle_switch(args):
     """Implements the 'mux switch' command. Prints shell commands."""
-    dim_name: str = args.dimension
+    dim_name: Optional[str] = args.dimension
     profile_name: Optional[str] = args.profile
     
-    dimension = find_dimension(dim_name, MUX_DIR_PATH)
-    if not dimension:
-        print_error(f"Dimension '{dim_name}' not found.")
-        sys.exit(1)
-        
-    available_profiles = dimension.get_profile_names()
-    if not available_profiles:
-         print_error(f"Dimension '{dim_name}' has no profiles defined.")
-         sys.exit(1)
-
-    # TODO: Implement FZF integration if profile_name is None
-    if profile_name is None:
-        print_error("FZF profile selection not yet implemented.")
-        print_error("Please provide a profile name: mux switch <dim> <profile>")
-        sys.exit(1)
-
-    if profile_name not in available_profiles:
-        print_error(f"Profile '{profile_name}' not found for dimension '{dim_name}'.")
-        print_error(f"Available profiles: {", ".join(available_profiles)}")
-        sys.exit(1)
-        
-    # Generate and print activation commands
+    # Initialize Mux
+    mux = Mux()
+    
     try:
-        commands = generate_activate_commands(dimension, profile_name)
-        print_shell_commands(commands)
-        # Print success message to stderr so it doesn't interfere with commands
-        console_err.print(f"Switched dimension [white]'{dimension.name}'[/white] to profile [green]'{profile_name}'[/green].")
-    except MuxError as e:
-        print_error(f"Failed to switch: {e}")
+        # Let the core Mux class handle all aspects of switching,
+        # including dimension/profile lookup and FZF interaction
+        mux.handle_switch(dim_name, profile_name)
+    except FzfNotInstalledError as e:
+        print_error(str(e))
+        print_error("Please install fzf to use interactive selection: https://github.com/junegunn/fzf")
+        sys.exit(1)
+    except (DimensionNotFoundError, ProfileNotFoundError) as e:
+        print_error(str(e))
         sys.exit(1)
 
 
 def handle_show(args):
     """Implements the 'mux show' command."""
     dim_name: str = args.dimension
-    dimension = find_dimension(dim_name, MUX_DIR_PATH)
-    
-    if not dimension:
-        print_error(f"Dimension '{dim_name}' not found.")
-        sys.exit(1)
-        
-    active_profile = get_active_profile(dimension.name) # Use state function
-    if not active_profile:
-        console.print(f"No active profile for dimension [bold white]'{dim_name}'[/bold white].")
-        return
-        
+    mux = Mux()
     try:
-        env_vars = dimension.get_env_vars(active_profile)
-        if not env_vars:
-            console.print(f"Active profile [bold green]'{active_profile}'[/bold green] for dimension [bold white]'{dim_name}'[/bold white] has no environment variables defined.")
-            return
-
-        table = Table(title=f"Active Environment for [bold white]'{dim_name}'[/bold white] ([bold green]{active_profile}[/bold green])",
-                      show_header=True, header_style="bold magenta")
-        table.add_column("Variable Name", style="dim cyan", width=30)
-        table.add_column("Current Value", style="white") # Show actual current env value
-        
-        for var_name in env_vars.keys(): # Iterate through expected vars
-            # Mux manages the original var name export, not a prefixed one usually
-            current_value = os.environ.get(var_name, "[dim i](Not Set)[/dim i]")
-            # Highlight if the value is different from what mux *thinks* it should be? Maybe too complex.
-            # Let's just show the current value for the var name mux expects to manage.
-            table.add_row(var_name, current_value)
-        
-        console.print(table)
-    except ProfileNotFoundError:
-         print_error(f"Active profile '{active_profile}' seems to be missing or invalid for dimension '{dim_name}'.")
-         sys.exit(1)
-    except MuxError as e:
-        print_error(f"Error showing environment for '{dim_name}': {e}")
+        # Delegate logic to Mux class
+        mux.handle_show(dim_name)
+    except (DimensionNotFoundError, ProfileNotFoundError) as e:
+        print_error(str(e))
         sys.exit(1)
 
 
-def handle_default(args):
-    """Implements the 'mux default' command."""
-    dim_name: str = args.dimension
-    profile_name: str = args.profile
+def handle_set_default(args):
+    """Implements the 'mux set-default' command."""
+    dim_name: Optional[str] = args.dimension
+    profile_name: Optional[str] = args.profile
     
-    dimension = find_dimension(dim_name, MUX_DIR_PATH)
-    if not dimension:
-        print_error(f"Dimension '{dim_name}' not found.")
-        sys.exit(1)
-        
-    if profile_name not in dimension.get_profile_names():
-        print_error(f"Profile '{profile_name}' not found for dimension '{dim_name}'.")
-        print_error(f"Available profiles: {", ".join(dimension.get_profile_names())}")
-        sys.exit(1)
-        
+    # Initialize Mux instance
+    mux = Mux()
+    
     try:
-        if dimension.set_default_profile(profile_name):
-            print_success(f"Default profile for dimension '{dimension.name}' set to '{profile_name}'.")
-    except MuxError as e:
-        print_error(f"Failed to set default profile: {e}")
+        # Let the core Mux class handle all aspects of setting the default,
+        # including dimension/profile lookup and FZF interaction
+        mux.handle_set_default(dim_name, profile_name)
+    except FzfNotInstalledError as e:
+        print_error(str(e))
+        print_error("Please install fzf to use interactive selection: https://github.com/junegunn/fzf")
+        sys.exit(1)
+    except (DimensionNotFoundError, ProfileNotFoundError) as e:
+        print_error(str(e))
         sys.exit(1)
 
-
-def handle_auto(args):
+def handle_hook(args):
     """Generates shell code for the auto-activation hook."""
-    # This script defines the hook function and registers it for bash/zsh
-    script = """
-_mux_auto_hook() {
-  # Check if mux command exists to avoid errors if mux is removed
-  if ! command -v mux >/dev/null; then
-    # Optional: print a warning to stderr?
-    # echo "mux command not found, cannot run auto hook." >&2
-    return 1
-  fi
+    # This script defines the hook function and registers it for bash/zsh/fish
+    from .prompt_scripts import get_prompt_script
+    import sys # Added sys import
 
-  # Call mux internal command to get activation/deactivation commands
-  local commands
-  # Use command substitution robustly, redirect stderr to avoid hook noise
-  if commands=$(mux _internal_auto_update 2>/dev/null); then
-      # Check if command substitution succeeded and produced output
-      if [[ -n "$commands" ]]; then
-          eval "$commands"
-      fi
-  else
-      # Optional: Handle error from _internal_auto_update if needed
-      # Mux command failed, potentially print to stderr?
-      # echo "Mux auto update failed" >&2
-      return 1 # Propagate error status
-  fi
-}
+    shell = args.shell
+    try:
+        script = get_prompt_script(shell)
+        print(script)
+    except ValueError:
+        # This should ideally not happen due to argparse choices, but good practice
+        console_err.print(f"Error: Unsupported shell '{shell}' provided.", style="bold red")
+        sys.exit(1)
 
-# Detect shell and register hook
-if [[ -n "$ZSH_VERSION" ]]; then
-  # Zsh setup using chpwd_functions array
-  # Check if the function is already in the array to avoid duplicates
-  if [[ ! " ${chpwd_functions[*]} " =~ " _mux_auto_hook " ]]; then
-    # Add the function to the array
-    chpwd_functions+=(_mux_auto_hook)
-  fi
-  # Run once immediately to set initial state
-  _mux_auto_hook
-elif [[ -n "$BASH_VERSION" ]]; then
-  # Bash setup using PROMPT_COMMAND string
-  _mux_prompt_command_hook() {
-    # Prevent infinite loops if something in the hook triggers PROMPT_COMMAND again
-    if [[ "$_MUX_IN_PROMPT_COMMAND" != "1" ]]; then
-       export _MUX_IN_PROMPT_COMMAND=1
-       _mux_auto_hook # Run the actual hook logic
-       # Capture exit status of the hook
-       local hook_exit_status=$?
-       unset _MUX_IN_PROMPT_COMMAND
-       # Return the hook's exit status to allow chaining in PROMPT_COMMAND
-       return $hook_exit_status
-    fi
-    return 0 # Avoid running recursively
-  }
-  # Add our hook wrapper to PROMPT_COMMAND if it's not already there
-  # Ensure it's added safely and preserves existing commands
-  if [[ ! "$PROMPT_COMMAND" =~ _mux_prompt_command_hook ]]; then
-    PROMPT_COMMAND="_mux_prompt_command_hook${PROMPT_COMMAND:+;}${PROMPT_COMMAND}"
-  fi
-  # Run once immediately to set initial state
-  _mux_auto_hook
-else
-  # Unsupported shell
-  echo "[mux auto] Error: Unsupported shell. Only Bash and Zsh are currently supported for auto-activation." >&2
-fi
-
-# Optional: Clean up helper function if defined and not needed globally
-# unset -f _mux_prompt_command_hook # Might be risky if user has a function with the same name
-
-"""
-    print(script)
+def handle_init(args):
+    """Implements the 'mux init' command to set up the directory structure."""
+    # Create base directories
+    ensure_mux_dir_exists()  # This ensures ~/.mux exists
+    
+    # Create dims and defaults directories if they don't exist
+    DIMS_DIR.mkdir(exist_ok=True)
+    
+    # Report what was created
+    console.print(f"[green]✓[/green] Created Mux directory: [bold]{MUX_DIR}[/bold]")
+    console.print(f"[green]✓[/green] Created dimensions directory: [bold]{DIMS_DIR}[/bold]")
+    
+    # Create example dimensions if requested
+    if args.with_examples:
+        # AWS dimension example
+        aws_dir = DIMS_DIR / "aws"
+        aws_dir.mkdir(exist_ok=True)
+        aws_profiles_dir = aws_dir / "profiles"
+        aws_profiles_dir.mkdir(exist_ok=True)
+        
+        # Create example profiles
+        with open(aws_profiles_dir / "personal", "w") as f:
+            f.write("AWS_PROFILE=personal\nAWS_REGION=us-west-2\n")
+        
+        with open(aws_profiles_dir / "work", "w") as f:
+            f.write("AWS_PROFILE=work\nAWS_REGION=us-east-1\n")
+        
+        # Set default profile
+        with open(aws_dir / "default.txt", "w") as f:
+            f.write("personal\n")
+            
+        # Kubernetes dimension with subdimensions example
+        k8s_dir = DIMS_DIR / "k8s"
+        k8s_dir.mkdir(exist_ok=True)
+        
+        # Create profiles.yaml for k8s
+        with open(k8s_dir / "profiles.yaml", "w") as f:
+            f.write("""# Kubernetes contexts
+dev:
+  KUBECONFIG: ~/.kube/dev-config
+  KUBE_CONTEXT: dev-context
+prod:
+  KUBECONFIG: ~/.kube/prod-config
+  KUBE_CONTEXT: prod-context
+""")
+        
+        # Set default profile
+        with open(k8s_dir / "default.txt", "w") as f:
+            f.write("dev\n")
+        
+        # Create subdimension for namespaces
+        k8s_dims_dir = k8s_dir / "dims"
+        k8s_dims_dir.mkdir(exist_ok=True)
+        
+        namespace_dir = k8s_dims_dir / "namespace"
+        namespace_dir.mkdir(exist_ok=True)
+        
+        # Create profiles.yaml for namespace
+        with open(namespace_dir / "profiles.yaml", "w") as f:
+            f.write("""# Kubernetes namespaces
+default:
+  KUBE_NAMESPACE: default
+app:
+  KUBE_NAMESPACE: my-application
+system:
+  KUBE_NAMESPACE: kube-system
+""")
+        
+        # Set default namespace
+        with open(namespace_dir / "default.txt", "w") as f:
+            f.write("default\n")
+            
+        console.print(f"[green]✓[/green] Created example dimensions:")
+        console.print(f"  • [bold]aws[/bold] - with profiles: personal, work")
+        console.print(f"  • [bold]k8s[/bold] - with profiles: dev, prod")
+        console.print(f"  • [bold]k8s/namespace[/bold] - with profiles: default, app, system")
+    
+    # Print next steps
+    console.print("\n[bold]Next steps:[/bold]")
+    console.print("1. Add your own dimensions and profiles in [bold]~/.mux/dims/[/bold]")
+    console.print("2. Use [bold]mux status[/bold] to see your dimensions and profiles")
+    console.print("3. Add shell integration with [bold]eval \"$(mux hook <shell>)\"[/bold]")
+    console.print("   Example: Add [bold]eval \"$(mux hook zsh)\"[/bold] to your [bold]~/.zshrc[/bold]")
 
 
 def handle_internal_auto_update(args):
@@ -265,6 +207,8 @@ def handle_internal_auto_update(args):
     unless critical errors occur (which should go to stderr, but sparingly).
     """
     config_filename = ".muxrc" # File containing dimension=profile mappings
+    all_commands: List[str] = []
+    mux = Mux() # Instantiate Mux once
     target_profiles: Dict[str, Optional[str]] = {} # Store desired state: dim -> profile (or None to deactivate)
     found_config = False
     config_path_for_error = None # Store path for potential error messages
@@ -306,93 +250,90 @@ def handle_internal_auto_update(args):
     except OSError as e:
          # Error accessing directories or reading file, likely permission issue.
          # Print to stderr as this might be unexpected.
-         console_err.print(f"[mux _internal_auto_update] Error accessing/reading {config_filename} hierarchy: {e}")
+         print_error(f"[mux hook] Error accessing/reading {config_filename} hierarchy: {e}")
          sys.exit(1) # Exit to indicate failure to the hook
     except Exception as e:
         # Catch other potential errors during file parsing
-        console_err.print(f"[mux _internal_auto_update] Error processing configuration {config_path_for_error or 'file'}: {e}")
+        print_error(f"[mux hook] Error processing configuration {config_path_for_error or 'file'}: {e}")
         sys.exit(1)
 
 
     # 3. Get all defined dimensions and current active profiles
-    all_defined_dims: Dict[str, Dimension] = {}
-    try:
-        all_defined_dims_map = find_dimensions(MUX_DIR_PATH)
-        all_defined_dims = {name: dim for name, dim in all_defined_dims_map.items() if dim}
-    except Exception as e:
-        # Error reading dimension structure
-        console_err.print(f"[mux _internal_auto_update] Error loading Mux dimensions: {e}")
-        sys.exit(1)
-
+    all_defined_dims = mux.all_dimensions
     currently_active_profiles: Dict[str, str] = {}
     for dim_name in all_defined_dims.keys():
         active = get_active_profile(dim_name)
         if active:
             currently_active_profiles[dim_name] = active
 
-    # 4. Determine the set of dimensions to consider
-    #    Includes dimensions in the target config AND currently active dimensions
+    # 4. Determine the set of dimensions to consider (targeted or currently active)
     affected_dim_names = set(target_profiles.keys()) | set(currently_active_profiles.keys())
 
     # 5. Generate activation/deactivation commands
-    all_commands: List[str] = []
-    processed_dims_for_deactivation = set() # Avoid double deactivation if found_config is false
-
     for dim_name in affected_dim_names:
         dimension = all_defined_dims.get(dim_name)
         if not dimension:
-            # Referenced dimension (in config or env) doesn't exist in ~/.mux definition. Skip.
-            # Optionally warn? console_err.print(f"Warning: Dimension '{dim_name}' not defined.")
+            # Referenced dimension doesn't exist, skip.
+            # If it was active, its state var will just remain.
+            # If it was in .muxrc, we can't activate it.
             continue
 
-        target_profile = target_profiles.get(dim_name) # Desired profile from .muxrc (or None if not mentioned)
+        target_profile = target_profiles.get(dim_name) # Desired profile from .muxrc (or None)
         current_profile = currently_active_profiles.get(dim_name) # Current active profile from env
 
-        if found_config:
-            # We found a .muxrc file somewhere
-            if target_profile:
-                # .muxrc specifies a profile for this dimension
-                if current_profile != target_profile:
-                    # Need to switch or activate
-                    if target_profile in dimension.get_profile_names():
-                        try:
-                            all_commands.extend(generate_activate_commands(dimension, target_profile))
-                        except MuxError as e:
-                            console_err.print(f"[mux] Error activating {dim_name}={target_profile}: {e}")
-                            # Should we try to deactivate instead or just fail? Let's just fail activation.
-                    else:
-                        # Specified profile doesn't exist for the dimension! Deactivate if active.
-                        console_err.print(f"[mux] Warning: Profile '{target_profile}' in '{config_path_for_error}' not found for dim '{dim_name}'. Deactivating.")
-                        if current_profile: # Only deactivate if it was active
-                            try:
-                                all_commands.extend(generate_deactivate_commands(dimension))
-                            except MuxError as e:
-                                console_err.print(f"[mux] Error deactivating {dim_name}: {e}")
-
-                # else: Already the correct profile, do nothing
+        commands_for_dim: List[str] = [] # Collect commands for this dimension
+        try:
+            if found_config:
+                # .muxrc determines the state
+                if target_profile:
+                    # Target profile specified in .muxrc
+                    if current_profile != target_profile:
+                        # Need to switch or activate
+                        if target_profile in dimension.get_profile_names():
+                            commands_for_dim = generate_activate_commands(dimension, target_profile)
+                        else:
+                            # Target profile doesn't exist, warn and deactivate if needed
+                            print_warning(f"[hook] Profile '{target_profile}' in '{config_path_for_error}' not found for dim '{dim_name}'. Deactivating.")
+                            if current_profile:
+                                commands_for_dim = generate_deactivate_commands(dimension)
+                else:
+                    # .muxrc exists but doesn't mention this dim. Deactivate if active.
+                    if current_profile:
+                        commands_for_dim = generate_deactivate_commands(dimension)
             else:
-                # .muxrc was found, but doesn't mention this dimension. Deactivate if active.
+                # No .muxrc found. Maintain the current state based on env vars.
                 if current_profile:
-                    try:
-                        all_commands.extend(generate_deactivate_commands(dimension))
-                    except MuxError as e:
-                        console_err.print(f"[mux] Error deactivating {dim_name}: {e}")
+                     # Ensure the currently active profile's vars are exported
+                     # generate_activate_commands handles deactivation of others if needed within its logic
+                    if current_profile in dimension.get_profile_names():
+                        commands_for_dim = generate_activate_commands(dimension, current_profile)
+                    else:
+                        # The active profile recorded in env var doesn't exist anymore!
+                        # This is an inconsistent state. Deactivate.
+                        print_warning(f"[hook] Active profile '{current_profile}' for dim '{dim_name}' no longer exists. Deactivating.")
+                        commands_for_dim = generate_deactivate_commands(dimension)
+                # else: No .muxrc and not currently active, do nothing.
 
-            processed_dims_for_deactivation.add(dim_name) # Mark as processed
+            all_commands.extend(commands_for_dim)
 
-        else:
-            # No .muxrc found in the current hierarchy. Deactivate if active and not already processed.
-             if current_profile and dim_name not in processed_dims_for_deactivation:
-                 try:
+        except ProfileNotFoundError as e:
+            # Handle case where generate_activate/deactivate fails because profile vanished
+            print_warning(f"[hook] Error processing dimension '{dim_name}': {e}. Attempting to deactivate.")
+            try:
+                # Try to cleanup by deactivating
+                if get_active_profile(dim_name): # Check state again before deactivating
                      all_commands.extend(generate_deactivate_commands(dimension))
-                 except MuxError as e:
-                     console_err.print(f"[mux] Error deactivating {dim_name}: {e}")
-
+            except MuxError as deact_e:
+                print_error(f"[hook] Failed to deactivate dimension '{dim_name}' after error: {deact_e}")
+        except MuxError as e:
+            print_error(f"[hook] Error processing dimension '{dim_name}': {e}")
+            # Decide if we should attempt deactivation or just report error?
+            # For now, just report the error and continue to next dimension.
 
     # 6. Print the combined commands to stdout
-    # Only print if there are actual commands to execute
-    if all_commands:
-        print_shell_commands(all_commands)
+    # Join with semicolons for shell execution
+    shell_output = "; ".join(filter(None, all_commands))
+    print(shell_output + ";") # Add trailing semicolon
 
 
 def main():
@@ -413,12 +354,17 @@ def main():
 
     # --- mux status ---
     parser_status = subparsers.add_parser('status', help='Show active profiles for all dimensions')
+    parser_status.add_argument('-v', '--verbose', action='store_true', help='Show all profiles, not just active ones')
     parser_status.set_defaults(func=handle_status)
 
     # --- mux switch ---
-    parser_switch = subparsers.add_parser('switch', help='Switch the active profile for a dimension (prints shell commands)')
-    parser_switch.add_argument('dimension', help='Name of the dimension to switch')
-    parser_switch.add_argument('profile', nargs='?', help='Name of the profile to activate (omit for FZF selector - NOT IMPLEMENTED)')
+    parser_switch = subparsers.add_parser('switch', 
+                                         help='Switch the active profile for a dimension (prints shell commands)',
+                                         description='Switch the active profile for a dimension. To execute the changes in your current shell, either:\n'
+                                                    '1. Source the shell wrapper using "mux hook <shell>", which provides a mux() function, or\n'
+                                                    '2. Manually evaluate the output: eval "$(mux switch dimension profile)"')
+    parser_switch.add_argument('dimension', nargs='?', help='Name of the dimension to switch (omit for FZF selector)')
+    parser_switch.add_argument('profile', nargs='?', help='Name of the profile to activate (omit for FZF selector)')
     parser_switch.set_defaults(func=handle_switch)
 
     # --- mux show ---
@@ -426,18 +372,33 @@ def main():
     parser_show.add_argument('dimension', help='Name of the dimension to show')
     parser_show.set_defaults(func=handle_show)
 
-    # --- mux default ---
-    parser_default = subparsers.add_parser('default', help='Set the default profile for a dimension')
-    parser_default.add_argument('dimension', help='Name of the dimension')
-    parser_default.add_argument('profile', help='Name of the profile to set as default')
-    parser_default.set_defaults(func=handle_default)
+    # --- mux set-default ---
+    parser_set_default = subparsers.add_parser('set-default', 
+                                           help='Set the default profile for a dimension',
+                                           description='Sets the default profile for a dimension. The default profile will be used when switching to the dimension without specifying a profile name.')
+    parser_set_default.add_argument('dimension', nargs='?', help='Name of the dimension to set the default for (omit for FZF selector)')
+    parser_set_default.add_argument('profile', nargs='?', help='Name of the profile to set as default (omit for FZF selector)')
+    parser_set_default.set_defaults(func=handle_set_default)
 
-    # --- mux auto ---
-    parser_auto = subparsers.add_parser('auto', help='Generate shell code for auto-activation hook')
-    parser_auto.set_defaults(func=handle_auto)
+    # --- mux hook --- 
+    parser_hook = subparsers.add_parser('hook', 
+                                       help='Generate shell hook script for auto-activation and switch command',
+                                       description='Generate shell integration script that does two things:\n'
+                                                  '1. Sets up auto-activation when changing directories\n'
+                                                  '2. Provides a mux() wrapper function that evaluates the output of "mux switch"\n\n'
+                                                  'To use: Add "eval "$(mux hook bash|zsh|fish)"" to your shell init file (~/.bashrc, ~/.zshrc, ~/.config/fish/config.fish)')
+    parser_hook.add_argument('shell', choices=['bash', 'zsh', 'fish'], help='Specify the target shell (bash, zsh, fish)')
+    parser_hook.set_defaults(func=handle_hook)
+
+    # --- mux init ---
+    parser_init = subparsers.add_parser('init',
+                                      help='Initialize the Mux directory structure',
+                                      description='Creates the necessary directory structure (~/.mux/dims, ~/.mux/defaults) and optionally adds example dimensions')
+    parser_init.add_argument('--with-examples', action='store_true', help='Create example dimensions and profiles')
+    parser_init.set_defaults(func=handle_init)
 
     # --- mux _internal_auto_update (Hidden command) ---
-    parser_internal_update = subparsers.add_parser('_internal_auto_update', help=argparse.SUPPRESS) # Hide from help
+    parser_internal_update = subparsers.add_parser('_internal_auto_update') # Hide from help
     parser_internal_update.set_defaults(func=handle_internal_auto_update)
 
 
@@ -451,16 +412,10 @@ def main():
         except MuxError as e:
              print_error(str(e)) # Use the helper function for consistent formatting
              sys.exit(1)
-        # except FzfNotInstalledError as e: # Example of more specific handling
-        #     print_error(str(e))
-        #     sys.exit(1)
         except Exception as e:
             # Catch unexpected errors during command execution
             # Log the type of error as well for better debugging
             console_err.print(f"[mux {args.command}] Unexpected error: ({type(e).__name__}) {e}")
-            # Optional: Add traceback logging for dev/debug modes
-            # import traceback
-            # console_err.print(traceback.format_exc())
             sys.exit(1)
     else:
         # No command was provided (and --version/--help wasn't triggered by argparse)

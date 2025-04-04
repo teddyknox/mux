@@ -25,8 +25,4 @@ PROFILE_ENV_FILE_SUFFIX = ".env"
 
 # Ensure base directories exist (optional, can be done on demand)
 # DIMS_DIR.mkdir(parents=True, exist_ok=True)
-# DEFAULTS_DIR.mkdir(parents=True, exist_ok=True)
-
-# Deprecated: Directory for storing user default profile selections (~/.mux/defaults)
-DEFAULTS_DIR = MUX_DIR / "defaults"
-
+# MUX_DEFAULT_PROFILES_DIR.mkdir(parents=True, exist_ok=True)

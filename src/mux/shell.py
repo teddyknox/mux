@@ -2,39 +2,21 @@
 
 import subprocess
 import os
-import sys
 from typing import List, Tuple, Dict, Optional
 
 from .config import ENV_VAR_PREFIX
 from .exceptions import FzfNotInstalledError
-# from .exceptions import FzfNotInstalledError # Example
+from .state import get_active_profile_env_var # Import helper from state
 
 # Functions related to shell interactions (env vars, fzf, command generation).
 
-def get_env_var_name(dim_path_tuple: Tuple[str, ...]) -> str:
-    """Generates the MUX_ACTIVE_* environment variable name for a dimension path."""
-    return f"{ENV_VAR_PREFIX}_{'_'.join(dim_path_tuple).upper()}"
-
 def get_active_profile_from_env(dimension: 'Dimension') -> Optional[str]:
-     """Reads the active profile for a dimension object from the environment."""
-     # Generate the expected environment variable name
-     # Use the dimension's path string directly for now, assuming Dimension has get_dim_path_str
-     # A more robust approach might involve ensuring a consistent tuple representation
-     if not hasattr(dimension, 'get_dim_path_str'):
-         # Fallback or error if the dimension object doesn't have the required method
-         # This indicates an issue with how the dimension object is passed or defined
-         # For now, return None, but this should be addressed if it occurs.
-         # print_warning(f"Dimension object missing 'get_dim_path_str' method.")
-         return None 
-         
-     dim_path_str = dimension.get_dim_path_str()
-     # Convert path string like 'a/b' to 'A_B' for the env var suffix
-     env_var_suffix = dim_path_str.replace('/', '_').upper()
-     env_var_name = f"{ENV_VAR_PREFIX}_{env_var_suffix}"
-     
-     return os.environ.get(env_var_name)
+    """Reads the active profile for a dimension object *directly* from the environment."""
+    # Use the dimension name and state helper to get the correct environment variable
+    env_var_name = get_active_profile_env_var(dimension.name)
+    return os.environ.get(env_var_name)
 
-def run_fzf(items: List[str], prompt: Optional[str] = None) -> Optional[str]:
+def run_fzf(items: List[str], prompt: Optional[str] = None, active_item: Optional[str] = None) -> Optional[str]:
     """Runs fzf to select an item from the list."""
     if not items:
         return None # No items to choose from
@@ -44,10 +26,36 @@ def run_fzf(items: List[str], prompt: Optional[str] = None) -> Optional[str]:
         # Use fzf's --prompt option
         fzf_command.extend(["--prompt", f"{prompt}> "])
         
-    # Add options for better TUI experience
-    fzf_command.extend(["--height", "40%", "--border", "--layout=reverse"])
+    # Calculate dynamic height based on number of items
+    # Add 3 lines for UI elements (header, prompt, border)
+    # Min height of 3 rows, max height of 15 rows or 40% of terminal
+    item_count = len(items)
+    height_value = min(max(item_count + 3, 3), 15)
     
-    input_str = "\n".join(items)
+    # If very few items, use exact height; otherwise use percentage
+    if item_count < 10:
+        height_param = f"{height_value}"
+    else:
+        height_param = "40%"
+    
+    # Add options for better TUI experience
+    fzf_command.extend(["--height", height_param, "--border", "--layout=reverse"])
+    
+    # Enable ANSI colors if we need to highlight the active item
+    if active_item is not None:
+        fzf_command.append("--ansi")
+        
+        # Create a new list of items with the active one highlighted
+        formatted_items = []
+        for item in items:
+            if item == active_item:
+                formatted_items.append(f"\033[1;32m{item} (active)\033[0m")  # Bold green with (active) suffix
+            else:
+                formatted_items.append(item)
+        
+        input_str = "\n".join(formatted_items)
+    else:
+        input_str = "\n".join(items)
     
     try:
         fzf_proc = subprocess.run(
@@ -60,8 +68,12 @@ def run_fzf(items: List[str], prompt: Optional[str] = None) -> Optional[str]:
         )
 
         if fzf_proc.returncode == 0:
-            # Success, return selected item
-            return fzf_proc.stdout.strip()
+            # Success, remove any ANSI color sequences and "(active)" suffix from the selected item
+            selected = fzf_proc.stdout.strip()
+            # If we selected the active item with formatting, strip it back to the original name
+            if active_item is not None and active_item in selected:
+                return active_item
+            return selected
         elif fzf_proc.returncode == 1: 
             # No match (e.g., user typed something with no results)
             return None
@@ -71,7 +83,6 @@ def run_fzf(items: List[str], prompt: Optional[str] = None) -> Optional[str]:
         else:
              # Other fzf error
              # Consider printing fzf_proc.stderr for debugging
-             # print_warning(f"fzf exited with unexpected code {fzf_proc.returncode}: {fzf_proc.stderr}")
              return None
              
     except FileNotFoundError:
@@ -80,67 +91,5 @@ def run_fzf(items: List[str], prompt: Optional[str] = None) -> Optional[str]:
          # Catch unexpected errors during subprocess execution
          # Re-raise as a runtime error or handle appropriately
          # For now, treat as cancellation
-         # print_warning(f"Unexpected error running fzf: {e}")
          return None
-
-def generate_shell_commands(
-    target_dim_path_str: str, # e.g., "kube/ns"
-    old_env: Optional[Dict[str, str]], # Environment of the currently active profile (if any)
-    new_env: Dict[str, str], # Environment of the profile being switched TO
-    new_profile_name: str # Name of the profile being switched TO
-) -> str:
-    """
-    Generates shell commands to transition from old_env to new_env.
-    Calculates variables to unset and export, including the MUX_ACTIVE variable.
-    Ensures unsets happen before exports.
-    """
-    commands = []
-    vars_to_export = new_env.copy() # Start with all new vars needing export
-    vars_to_unset = set()
-
-    # Calculate MUX_ACTIVE variable name for the target dimension
-    mux_active_var_suffix = target_dim_path_str.replace('/', '_').upper()
-    mux_active_var_name = f"{ENV_VAR_PREFIX}_{mux_active_var_suffix}"
-    vars_to_export[mux_active_var_name] = new_profile_name # Ensure MUX_ACTIVE is set
-
-    if old_env:
-        # Find vars present in old but not new
-        for key, old_value in old_env.items():
-            if key not in new_env or new_env[key] != old_value:
-                vars_to_unset.add(key)
-                
-        # Always add the target MUX_ACTIVE var to unset if switching from an old profile
-        vars_to_unset.add(mux_active_var_name)
-            
-    else:
-        # No old environment, nothing specific to unset from the previous profile
-        # but we still might need to unset the target MUX_ACTIVE if it somehow exists
-        # (e.g., set manually). Check if it exists in the actual environment.
-        if os.environ.get(mux_active_var_name) is not None:
-             vars_to_unset.add(mux_active_var_name)
-             
-    # --- Generate Commands --- 
-    
-    # Prioritize unsetting MUX_ACTIVE variables
-    mux_vars_to_unset = {v for v in vars_to_unset if v.startswith(ENV_VAR_PREFIX)}
-    other_vars_to_unset = vars_to_unset - mux_vars_to_unset
-
-    # Unset commands
-    for var in sorted(list(mux_vars_to_unset)):
-        commands.append(f"unset {var};")
-    for var in sorted(list(other_vars_to_unset)):
-        # Avoid unsetting a variable that will be immediately exported with the same name
-        # This prevents unnecessary `unset FOO; export FOO=bar;` churn if only the value changed.
-        # If a var is in both vars_to_unset and vars_to_export, it means the value changed,
-        # so just exporting it is sufficient.
-        if var not in vars_to_export:
-            commands.append(f"unset {var};")
-
-    # Export commands (includes the target MUX_ACTIVE variable)
-    for key, value in sorted(vars_to_export.items()):
-        # Basic shell escaping for the value
-        escaped_value = value.replace("'", "'\\''") # More robust escaping for single quotes
-        commands.append(f"export {key}='{escaped_value}';")
-
-    return " ".join(commands)
 

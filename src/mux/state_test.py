@@ -1,34 +1,32 @@
 import os
-import pytest
+import json # Added for MUX_MANAGED_VARS
 from unittest.mock import MagicMock, patch
+from typing import Dict, List, Optional
+
+import pytest # Import pytest for raises
 
 from mux.state import (
     get_active_profile_env_var,
-    get_profile_var_env_name,
+    # get_profile_var_env_name, # No longer needed?
+    get_managed_vars_env_var, # New tracker var
     get_active_profile,
-    get_currently_set_vars_for_dim,
+    # get_currently_set_vars_for_dim, # Removed function
+    get_currently_managed_vars,
     generate_activate_commands,
-    generate_deactivate_commands
+    generate_deactivate_commands,
 )
-# Mock Dimension class needed for generate commands
-class MockDimension:
-    def __init__(self, name, profiles):
-        self.name = name
-        self._profiles = profiles
+from mux.dimension import Dimension # Import Dimension for type hint
+from mux.exceptions import MuxError # Import MuxError
+from mux.utils import MUX_DIR_PATH # Import for default profile tests
 
-    def get_env_vars(self, profile_name):
-        return self._profiles.get(profile_name, {})
-
-
-# --- Test Naming Functions ---
-
-def test_get_active_profile_env_var():
-    assert get_active_profile_env_var("kube") == "MUX_ACTIVE_KUBE"
-    assert get_active_profile_env_var("aws_Region") == "MUX_ACTIVE_AWS_REGION"
-
-def test_get_profile_var_env_name():
-    assert get_profile_var_env_name("kube", "NAMESPACE") == "MUX_VAR_KUBE_NAMESPACE"
-    assert get_profile_var_env_name("aws", "accessKeyId") == "MUX_VAR_AWS_ACCESSKEYID"
+# Fixture for a mock Dimension object
+@pytest.fixture
+def mock_dimension():
+    dim = MagicMock(spec=Dimension)
+    dim.name = "kube"
+    # Mock the method that returns profile environment variables
+    dim.get_env_vars.side_effect = lambda profile_name: {"VAR1": f"{profile_name}_val1", "VAR2": f"{profile_name}_val2"} if profile_name == "dev" else {"VAR_X": "prod_valX"}
+    return dim
 
 # --- Test Reading State ---
 
@@ -38,108 +36,93 @@ def test_get_active_profile():
     assert get_active_profile("aws") == "prod"
     assert get_active_profile("gcp") is None
 
-@patch.dict(os.environ, {
-    "MUX_ACTIVE_KUBE": "dev",
-    "MUX_VAR_KUBE_NAMESPACE": "dev-ns",
-    "MUX_VAR_KUBE_SERVER": "https://dev.server",
-    "MUX_VAR_AWS_REGION": "us-west-2",
-    "OTHER_VAR": "something",
-})
-def test_get_currently_set_vars_for_dim():
-    kube_vars = get_currently_set_vars_for_dim("kube")
-    assert kube_vars == {
-        "MUX_VAR_KUBE_NAMESPACE": "dev-ns",
-        "MUX_VAR_KUBE_SERVER": "https://dev.server"
-    }
-
-    aws_vars = get_currently_set_vars_for_dim("aws")
-    assert aws_vars == {"MUX_VAR_AWS_REGION": "us-west-2"}
-
-    gcp_vars = get_currently_set_vars_for_dim("gcp")
-    assert gcp_vars == {}
-
 # --- Test Generating Commands ---
 
-@patch('mux.state.get_currently_set_vars_for_dim')
-def test_generate_activate_commands_no_previous(mock_get_current):
-    mock_get_current.return_value = {} # No existing vars for this dim
-    
-    dim = MockDimension("kube", {
-        "dev": {"NAMESPACE": "dev-ns", "USER": "dev-user"}
-    })
-    
-    commands = generate_activate_commands(dim, "dev")
-    
-    expected = [
-        # No unset commands expected
-        "export MUX_VAR_KUBE_NAMESPACE='dev-ns'",
-        "export MUX_VAR_KUBE_USER='dev-user'",
-        "export MUX_ACTIVE_KUBE='dev'"
-    ]
-    assert commands == expected
-    mock_get_current.assert_called_once_with("kube")
+@patch('mux.state.get_currently_managed_vars')
+def test_generate_activate_commands_no_previous(mock_get_managed, mock_dimension):
+    """Test activating a profile when none was active before."""
+    mock_get_managed.return_value = [] # Simulate no previously managed vars
 
-@patch('mux.state.get_currently_set_vars_for_dim')
-def test_generate_activate_commands_with_previous(mock_get_current):
-    mock_get_current.return_value = { # Previous profile vars
-        "MUX_VAR_KUBE_NAMESPACE": "old-ns", 
-        "MUX_VAR_KUBE_TOKEN": "old-token"
-    }
-    
-    dim = MockDimension("kube", {
-        "prod": {"NAMESPACE": "prod-ns", "SERVER": "prod.server"}
-    })
-    
-    commands = generate_activate_commands(dim, "prod")
-    
-    expected = [
-        "unset MUX_VAR_KUBE_NAMESPACE", # Unset old vars
-        "unset MUX_VAR_KUBE_TOKEN",
-        "export MUX_VAR_KUBE_NAMESPACE='prod-ns'", # Export new vars
-        "export MUX_VAR_KUBE_SERVER='prod.server'",
-        "export MUX_ACTIVE_KUBE='prod'" # Set active profile
-    ]
-    # Use set comparison as order of unset commands might not be guaranteed
-    assert set(commands) == set(expected)
-    # Ensure all expected commands are present and the structure is correct
-    assert len(commands) == len(expected)
-    assert commands[-1] == expected[-1] # Active profile export must be last
-    assert commands[0].startswith("unset")
-    assert commands[1].startswith("unset")
-    assert commands[2].startswith("export")
-    assert commands[3].startswith("export")
+    commands = generate_activate_commands(mock_dimension, "dev")
 
-    mock_get_current.assert_called_once_with("kube")
+    # Expected commands:
+    # 1. Export new vars
+    # 2. Export managed vars tracker
+    # 3. Export active profile marker
+    assert "export VAR1='dev_val1'" in commands
+    assert "export VAR2='dev_val2'" in commands
+    assert "unset MUX_MANAGED_VARS_KUBE" not in commands # Should set, not unset
+    # Check for the export of the managed vars JSON list
+    expected_managed_json = json.dumps(["VAR1", "VAR2"])
+    assert f"export MUX_MANAGED_VARS_KUBE='{expected_managed_json}'" in commands
+    assert "export MUX_ACTIVE_KUBE='dev'" in commands
+    assert len(commands) == 4 # Ensure no extra commands
 
-@patch('mux.state.get_currently_set_vars_for_dim')
-def test_generate_deactivate_commands(mock_get_current):
-    mock_get_current.return_value = { # Vars currently set for the profile to deactivate
-        "MUX_VAR_KUBE_NAMESPACE": "dev-ns", 
-        "MUX_VAR_KUBE_TOKEN": "dev-token"
-    }
-    
-    dim = MockDimension("kube", {}) # Profiles content doesn't matter for deactivate
-    
-    commands = generate_deactivate_commands(dim)
-    
-    expected = [
-        "unset MUX_VAR_KUBE_NAMESPACE",
-        "unset MUX_VAR_KUBE_TOKEN",
-        "unset MUX_ACTIVE_KUBE"
-    ]
-    assert set(commands) == set(expected) # Order doesn't strictly matter
-    assert len(commands) == len(expected)
-    assert commands[-1] == "unset MUX_ACTIVE_KUBE"
+@patch('mux.state.get_currently_managed_vars')
+def test_generate_activate_commands_with_previous(mock_get_managed, mock_dimension):
+    """Test activating a profile when another was active."""
+    # Simulate that 'VAR_OLD' and 'VAR1' were managed by the previous profile
+    mock_get_managed.return_value = ["VAR_OLD", "VAR1"]
 
-    mock_get_current.assert_called_once_with("kube")
+    # Activate 'dev' profile (vars: VAR1, VAR2)
+    commands = generate_activate_commands(mock_dimension, "dev")
 
+    # Expected commands:
+    # 1. Unset old managed vars (VAR_OLD, VAR1)
+    # 2. Export new vars (VAR1, VAR2)
+    # 3. Export new managed vars tracker ([VAR1, VAR2])
+    # 4. Export active profile marker (dev)
 
-@patch('mux.state.get_currently_set_vars_for_dim')
-def test_generate_deactivate_commands_none_active(mock_get_current):
-    mock_get_current.return_value = {} # No vars currently set
-    dim = MockDimension("kube", {})
-    commands = generate_deactivate_commands(dim)
-    expected = [
-        "unset MUX_ACTIVE_KUBE"
-    ]
-    assert commands == expected 
+    # Check order roughly - unsets should generally come first
+    unset_old_index = commands.index("unset VAR_OLD")
+    unset_var1_index = commands.index("unset VAR1")
+    export_var1_index = commands.index("export VAR1='dev_val1'")
+    export_var2_index = commands.index("export VAR2='dev_val2'")
+    export_managed_index = commands.index(f"export MUX_MANAGED_VARS_KUBE='{json.dumps(['VAR1', 'VAR2'])}'")
+    export_active_index = commands.index("export MUX_ACTIVE_KUBE='dev'")
+
+    assert unset_old_index < export_var1_index
+    assert unset_var1_index < export_var1_index
+    assert unset_old_index < export_var2_index
+    assert unset_var1_index < export_var2_index
+
+    assert "unset VAR_OLD" in commands
+    assert "unset VAR1" in commands
+    assert "export VAR1='dev_val1'" in commands
+    assert "export VAR2='dev_val2'" in commands
+    assert f"export MUX_MANAGED_VARS_KUBE='{json.dumps(['VAR1', 'VAR2'])}'" in commands
+    assert "export MUX_ACTIVE_KUBE='dev'" in commands
+    assert len(commands) == 6
+
+@patch('mux.state.get_currently_managed_vars')
+def test_generate_deactivate_commands(mock_get_managed, mock_dimension):
+    """Test deactivating a profile."""
+    # Simulate that 'VAR1' and 'VAR2' were managed by the active profile
+    mock_get_managed.return_value = ["VAR1", "VAR2"]
+
+    commands = generate_deactivate_commands(mock_dimension)
+
+    # Expected commands:
+    # 1. Unset managed vars (VAR1, VAR2)
+    # 2. Unset managed vars tracker
+    # 3. Unset active profile marker
+
+    assert "unset VAR1" in commands
+    assert "unset VAR2" in commands
+    assert "unset MUX_MANAGED_VARS_KUBE" in commands
+    assert "unset MUX_ACTIVE_KUBE" in commands
+    assert len(commands) == 4
+
+@patch('mux.state.get_currently_managed_vars')
+def test_generate_deactivate_commands_none_active(mock_get_managed, mock_dimension):
+    """Test deactivating when no profile was technically active (no managed vars tracked)."""
+    mock_get_managed.return_value = [] # Simulate no managed vars tracked
+
+    commands = generate_deactivate_commands(mock_dimension)
+
+    # Expected commands:
+    # 1. Unset managed vars tracker (even if it wasn't set, safe to unset)
+    # 2. Unset active profile marker (even if it wasn't set, safe to unset)
+    assert "unset MUX_MANAGED_VARS_KUBE" in commands
+    assert "unset MUX_ACTIVE_KUBE" in commands
+    assert len(commands) == 2 # Only unset the tracker and active vars 

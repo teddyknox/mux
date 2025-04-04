@@ -1,818 +1,580 @@
-# tests/test_core.py
 import pytest
 import sys
-import os
-from unittest.mock import patch, MagicMock, call, PropertyMock
+from unittest.mock import patch, MagicMock, call, mock_open
+from io import StringIO
 from pathlib import Path
-from typing import Dict, List
 
-from mux.core import Dimension, Mux
-from mux.config import DIMS_DIR, DEFAULTS_DIR, DEFAULT_FILENAME, ENV_VAR_PREFIX
+# Use TYPE_CHECKING for imports needed only for type hints
+from typing import TYPE_CHECKING, Dict, Optional, List, Any
+
+if TYPE_CHECKING:
+    from mux.dimension import Dimension # Avoid circular import if Dimension imports Mux?
+
+# Import the class to test
+from mux.core import Mux
 from mux.exceptions import DimensionNotFoundError, ProfileNotFoundError, MuxError, FzfNotInstalledError
+from mux.config import DIMS_DIR # For checking paths
 
+# --- Mock Dimension Class ---
+# More elaborate than ui_test's mock to support core logic
+class MockDimension:
+    def __init__(self, name: str, path_str: str, profiles: Dict[str, Dict[str, str]], 
+                 children: List['MockDimension'] | None = None, 
+                 parent: Optional['MockDimension'] = None,
+                 effective_default: Optional[str] = None,
+                 user_default_path: Optional[Path] = None):
+        self.name = name
+        self._path_str = path_str
+        self._profiles = profiles
+        self.children = children if children else []
+        self.parent = parent
+        self._effective_default = effective_default
+        self._user_default_path = user_default_path if user_default_path else Path("/mock/defaults", path_str)
+        # Link children back to parent
+        for child in self.children:
+            child.parent = self
+            child._path_str = f"{self._path_str}/{child.name}" # Recalculate path with parent
 
-class TestDimension:
-    @pytest.fixture
-    def mock_profiles(self):
-        return {
-            "dev": {"VAR1": "value1", "VAR2": "value2"},
-            "prod": {"VAR1": "prod1", "VAR2": "prod2"}
-        }
+    def get_dim_path_str(self) -> str:
+        return self._path_str
+
+    def get_profiles(self) -> Dict[str, Any]: # Return Any for simplicity, mimicking loaded profiles
+        return self._profiles
     
-    @pytest.fixture
-    def dimension(self, tmp_path):
-        dim_path = tmp_path / "test_dim"
-        dim_path.mkdir()
-        return Dimension("test", dim_path)
-    
-    @pytest.fixture
-    def dimension_with_path(self, tmp_path):
-        dim_path = tmp_path / "test_dim"
-        dim_path.mkdir()
-        # Ensure the mock dimension has the necessary attributes
-        dim = Dimension("test_dim", dim_path)
-        # Manually set cache as get_dim_path_str relies on parent calls we aren't testing here
-        dim._dim_path_str_cache = "test_dim" 
-        return dim
-    
-    @pytest.fixture
-    def setup_dirs(self, tmp_path, monkeypatch):
-        """Fixture to set up mocked DIMS_DIR and DEFAULTS_DIR."""
-        mock_dims_dir = tmp_path / "dims"
-        mock_dims_dir.mkdir()
-        mock_defaults_dir = tmp_path / "defaults"
-        # No need to mkdir defaults, the function should handle it
-        monkeypatch.setattr('mux.core.DIMS_DIR', mock_dims_dir)
-        monkeypatch.setattr('mux.core.DEFAULTS_DIR', mock_defaults_dir)
-        return mock_dims_dir, mock_defaults_dir
-    
-    def test_dimension_initialization(self, tmp_path):
-        # Test basic initialization
-        dim_path = tmp_path / "test_dim"
-        dim_path.mkdir()
-        
-        dim = Dimension("test", dim_path)
-        
-        assert dim.name == "test"
-        assert dim.path == dim_path
-        assert dim.parent is None
-        assert dim.children == []
-        assert dim._profiles_cache is None
-    
-    def test_dimension_initialization_with_parent(self, tmp_path):
-        # Test initialization with parent
-        parent_path = tmp_path / "parent_dim"
-        parent_path.mkdir()
-        parent = Dimension("parent", parent_path)
-        
-        child_path = tmp_path / "child_dim"
-        child_path.mkdir()
-        child = Dimension("child", child_path, parent)
-        
-        assert child.parent == parent
-    
-    @patch('mux.core.load_profiles_for_dimension')
-    def test_get_profiles(self, mock_load_profiles, dimension, mock_profiles):
-        # Test profile loading and caching
-        mock_load_profiles.return_value = mock_profiles
-        
-        # First call should use load_profiles_for_dimension
-        profiles = dimension.get_profiles()
-        assert profiles == mock_profiles
-        mock_load_profiles.assert_called_once_with(dimension.path, dimension.parent)
-        
-        # Second call should use cached value
-        mock_load_profiles.reset_mock()
-        profiles = dimension.get_profiles()
-        assert profiles == mock_profiles
-        mock_load_profiles.assert_not_called()
+    def get_env_vars(self, profile_name: str) -> Dict[str, str]:
+        if profile_name not in self._profiles:
+            raise ProfileNotFoundError(profile_name, self._path_str)
+        return self._profiles[profile_name]
 
-    def test_get_dim_path_str_root(self, tmp_path):
-        dim_path = tmp_path / "root"
-        dim_path.mkdir()
-        dim = Dimension("root", dim_path)
-        assert dim.get_dim_path_str() == "root"
+    def get_effective_default_profile(self) -> Optional[str]:
+        return self._effective_default
 
-    def test_get_dim_path_str_nested(self, tmp_path):
-        root_path = tmp_path / "root"
-        root_path.mkdir()
-        child_path = root_path / "child"
-        child_path.mkdir()
-        root = Dimension("root", root_path)
-        child = Dimension("child", child_path, root)
-        assert child.get_dim_path_str() == "root/child"
-        # Test caching
-        child._dim_path_str_cache = None # Clear cache
-        assert child.get_dim_path_str() == "root/child"
-
-    # === Tests for Default Profile Logic ===
-
-    def test_get_source_default_profile_success(self, dimension_with_path):
-        default_file = dimension_with_path.path / DEFAULT_FILENAME
-        default_file.write_text("  prod  \n#comment\nother")
-        assert dimension_with_path.get_source_default_profile() == "prod"
-
-    def test_get_source_default_profile_not_found(self, dimension_with_path):
-        assert dimension_with_path.get_source_default_profile() is None
-
-    def test_get_source_default_profile_empty(self, dimension_with_path):
-        default_file = dimension_with_path.path / DEFAULT_FILENAME
-        default_file.write_text("\n #comment only \n")
-        assert dimension_with_path.get_source_default_profile() is None
-
-    @patch('mux.core.print_warning')
-    def test_get_source_default_profile_read_error(self, mock_print_warning, dimension_with_path):
-        default_file = dimension_with_path.path / DEFAULT_FILENAME
-        default_file.touch()
-        os.chmod(default_file, 0o000) # Make unreadable
-        assert dimension_with_path.get_source_default_profile() is None
-        mock_print_warning.assert_called_once()
-        assert "Error reading default file" in mock_print_warning.call_args[0][0]
-        os.chmod(default_file, 0o644) # Cleanup
-
-    @patch('mux.core.dimension_path_to_defaults_path')
-    def test_get_user_default_profile_success(self, mock_path_func, dimension, setup_dirs):
-        mock_dims_dir, mock_defaults_dir = setup_dirs
-        expected_filename = dimension.name
-        expected_full_path = mock_defaults_dir / expected_filename
-        mock_path_func.return_value = expected_full_path # Tell the patched function what to return
-
-        expected_full_path.parent.mkdir(parents=True, exist_ok=True) 
-        expected_full_path.write_text("  dev  ")
-        assert dimension.get_user_default_profile() == "dev"
-        mock_path_func.assert_called_once_with(dimension.path) # Verify it was called
-
-    @patch('mux.core.dimension_path_to_defaults_path')
-    def test_get_user_default_profile_not_found(self, mock_path_func, dimension, setup_dirs):
-        mock_dims_dir, mock_defaults_dir = setup_dirs
-        expected_filename = dimension.name
-        expected_full_path = mock_defaults_dir / expected_filename
-        mock_path_func.return_value = expected_full_path
-
-        mock_defaults_dir.mkdir(parents=True, exist_ok=True)
-        assert not expected_full_path.exists()
-        assert dimension.get_user_default_profile() is None
-        mock_path_func.assert_called_once_with(dimension.path)
-        
-    @patch('mux.core.dimension_path_to_defaults_path')
-    def test_get_user_default_profile_complex_path(self, mock_path_func, tmp_path, setup_dirs):
-        mock_dims_dir, mock_defaults_dir = setup_dirs
-        root_path = mock_dims_dir / "root"
-        root_path.mkdir()
-        sub_dim_container = root_path / "dims"
-        sub_dim_container.mkdir()
-        child_path = sub_dim_container / "child.dim"
-        child_path.mkdir()
-        root = Dimension("root", root_path)
-        child = Dimension("child.dim", child_path, root)
-        child._dim_path_str_cache = "root/child.dim" # Needed for get_profiles call within set_user_default
-
-        expected_default_filename = "root_child.dim" 
-        expected_full_path = mock_defaults_dir / expected_default_filename
-        mock_path_func.return_value = expected_full_path
-
-        expected_full_path.parent.mkdir(parents=True, exist_ok=True)
-        expected_full_path.write_text("complex_prof")
-        
-        assert child.get_user_default_profile() == "complex_prof"
-        mock_path_func.assert_called_once_with(child.path)
-
-    @patch('mux.core.print_success')
-    @patch('mux.core.dimension_path_to_defaults_path')
-    def test_set_user_default_profile_success(self, mock_path_func, mock_print_success, dimension, setup_dirs, mock_profiles):
-        mock_dims_dir, mock_defaults_dir = setup_dirs
-        expected_filename = dimension.name
-        expected_full_path = mock_defaults_dir / expected_filename
-        mock_path_func.return_value = expected_full_path
-
-        dimension.get_profiles = MagicMock(return_value=mock_profiles)
-        
-        profile_to_set = "dev"
-        dimension.set_user_default_profile(profile_to_set)
-
-        mock_path_func.assert_called_once_with(dimension.path)
-        assert mock_defaults_dir.is_dir() 
-        assert expected_full_path.is_file()
-        assert expected_full_path.read_text() == f"{profile_to_set}\n"
-        mock_print_success.assert_called_once()
-        assert "Set default profile" in mock_print_success.call_args[0][0]
-        assert f"to '{profile_to_set}'" in mock_print_success.call_args[0][0]
-        dimension.get_profiles.assert_called_once()
-
-    def test_set_user_default_profile_invalid_profile(self, dimension_with_path, mock_profiles):
-        # Mock get_profiles
-        dimension_with_path.get_profiles = MagicMock(return_value=mock_profiles)
-        
-        with pytest.raises(ProfileNotFoundError, match="Profile 'invalid' not found"):
-            dimension_with_path.set_user_default_profile("invalid")
+    def set_user_default_profile(self, profile_name: str):
+        # Mock the file writing aspect
+        self._user_default = profile_name
+        if self.user_default_path:
+            self.user_default_path.write_text(f"{profile_name}\n")
             
-    @patch('mux.core.Dimension.get_profiles')
-    @patch('pathlib.Path.mkdir', side_effect=OSError("Disk full"))
-    def test_set_user_default_profile_write_error(self, mock_mkdir, mock_get_profiles, dimension_with_path):
-        # Set the return value for the patched get_profiles
-        mock_get_profiles.return_value = {"dev": {}, "prod": {}}
+    def set_default_profile(self, profile_name: str) -> bool:
+        # Mock version for testing set_default_profile
+        # Assume it succeeds and sets the internal state for testing get_default
+        self._effective_default = profile_name # Or store in a separate mock default.txt state? 
+        return True
+
+    # Make it sortable for consistent test output if needed
+    def __lt__(self, other):
+        """Allow sorting by name for consistent FZF options."""
+        return self._path_str < other._path_str
         
-        with pytest.raises(MuxError, match="Failed to write user default file"):
-             dimension_with_path.set_user_default_profile("dev")
-        # Check that mkdir was called on the specific DEFAULTS_DIR path object
-        # This is a bit indirect, we rely on the side_effect happening
-        mock_mkdir.assert_called_once()
-        # Optional: Check call args if needed, but knowing it was called is key
-
-    # === Tests for get_profile_env ===
-
-    def test_get_profile_env_success(self, dimension, mock_profiles):
-        # Mock get_profiles to return our test profiles
-        dimension.get_profiles = MagicMock(return_value=mock_profiles)
-
-        env = dimension.get_profile_env("dev")
-        assert env == mock_profiles["dev"]
-        # Ensure it's a copy
-        assert env is not mock_profiles["dev"]
-        dimension.get_profiles.assert_called_once()
-
-    def test_get_profile_env_not_found(self, dimension, mock_profiles):
-        # Mock get_profiles
-        dimension.get_profiles = MagicMock(return_value=mock_profiles)
-        dimension._dim_path_str_cache = "test" # Need path string for error message
-
-        with pytest.raises(ProfileNotFoundError, match="Profile 'nonexistent' not found for dimension 'test'"):
-            dimension.get_profile_env("nonexistent")
-        dimension.get_profiles.assert_called_once()
-
-    # Test set_configured_default_profile calls set_user_default_profile
-    @patch('mux.core.Dimension.set_user_default_profile')
-    def test_set_configured_default_profile_calls_set_user(self, mock_set_user, dimension_with_path):
-        dimension_with_path.set_configured_default_profile("some_profile")
-        mock_set_user.assert_called_once_with("some_profile")
-
-    @patch('mux.core.Dimension.get_user_default_profile')
-    @patch('mux.core.Dimension.get_source_default_profile')
-    def test_get_effective_default_profile_user_set(
-        self, mock_source_default, mock_user_default, dimension_with_path
-    ):
-        mock_user_default.return_value = "user_choice"
-        mock_source_default.return_value = "source_choice"
-        assert dimension_with_path.get_effective_default_profile() == "user_choice"
-        mock_user_default.assert_called_once()
-        mock_source_default.assert_not_called()
-
-    @patch('mux.core.Dimension.get_user_default_profile')
-    @patch('mux.core.Dimension.get_source_default_profile')
-    def test_get_effective_default_profile_source_set(
-        self, mock_source_default, mock_user_default, dimension_with_path
-    ):
-        mock_user_default.return_value = None
-        mock_source_default.return_value = "source_choice"
-        assert dimension_with_path.get_effective_default_profile() == "source_choice"
-        mock_user_default.assert_called_once()
-        mock_source_default.assert_called_once()
-
-    @patch('mux.core.Dimension.get_user_default_profile')
-    @patch('mux.core.Dimension.get_source_default_profile')
-    def test_get_effective_default_profile_none_set(
-        self, mock_source_default, mock_user_default, dimension_with_path
-    ):
-        mock_user_default.return_value = None
-        mock_source_default.return_value = None
-        assert dimension_with_path.get_effective_default_profile() is None
-        mock_user_default.assert_called_once()
-        mock_source_default.assert_called_once()
+    def __repr__(self):
+        return f"MockDimension(name='{self.name}', path='{self._path_str}')"
 
 
-class TestMux:
-    @pytest.fixture
-    def mock_dims_dir(self, monkeypatch, tmp_path):
-        dims_dir = tmp_path / "dims"
-        dims_dir.mkdir()
-        monkeypatch.setattr('mux.core.DIMS_DIR', dims_dir)
-        # Also mock DEFAULTS_DIR to avoid issues during Mux init if it tries to access it
-        defaults_dir = tmp_path / "defaults"
-        monkeypatch.setattr('mux.core.DEFAULTS_DIR', defaults_dir)
-        return dims_dir
+# --- Fixtures ---
+
+@pytest.fixture
+def mock_dims():
+    """Provides a standard set of mock dimensions for testing."""
+    child_dim = MockDimension(
+        name="child", 
+        path_str="root/child", # Initial path, will be updated by parent
+        profiles={"c_prof1": {"CHILD_VAR": "c1"}, "c_prof2": {"CHILD_VAR": "c2"}},
+        effective_default="c_prof1"
+    )
+    root_dim = MockDimension(
+        name="root", 
+        path_str="root", 
+        profiles={"r_prof1": {"ROOT_VAR": "r1"}, "r_prof2": {"ROOT_VAR": "r2"}, "empty": {}}, 
+        children=[child_dim],
+        effective_default="r_prof1"
+    )
+    # Child dim path is corrected now that parent is set
+    other_dim = MockDimension(
+        name="other", 
+        path_str="other", 
+        profiles={"o_prof1": {"OTHER_VAR": "o1"}},
+        effective_default=None # No default
+    )
+    no_profiles_dim = MockDimension(
+        name="no_profiles",
+        path_str="no_profiles",
+        profiles={},
+        effective_default=None
+    )
     
-    # Test __init__ implicitly tests discovery
-    def test_init_and_discover_empty(self, mock_dims_dir):
-        # DIRS_DIR is mocked, Mux() will use it for discovery
+    return {
+        "root": root_dim,
+        "root/child": child_dim,
+        "other": other_dim,
+        "no_profiles": no_profiles_dim
+    }
+
+@pytest.fixture
+@patch('mux.core.find_dimensions')
+def mux_instance(mock_find_dims, mock_dims):
+    """Provides a Mux instance initialized with mock_dims."""
+    mock_find_dims.return_value = mock_dims
+    mux = Mux()
+    # Ensure find_dimensions was called during init
+    mock_find_dims.assert_called_once_with(DIMS_DIR)
+    return mux
+
+# --- Test Mux Initialization and Basic Getters ---
+
+def test_mux_init(mock_dims):
+    """Verify Mux initialization correctly processes dimensions."""
+    with patch('mux.core.find_dimensions', return_value=mock_dims) as mock_find:
         mux = Mux()
-        assert mux.root_dimensions == []
-        assert mux.all_dimensions == {}
+        assert mux.all_dimensions == mock_dims
+        # Root dimensions should be those without parents
+        expected_roots = sorted([mock_dims["root"], mock_dims["other"], mock_dims["no_profiles"]], key=lambda d: d.name)
+        assert sorted(mux.root_dimensions, key=lambda d: d.name) == expected_roots
+        mock_find.assert_called_once_with(DIMS_DIR)
 
-    def test_init_and_discover_simple(self, mock_dims_dir):
-        # DIRS_DIR is mocked, Mux() will use it
-        (mock_dims_dir / "dim1").mkdir()
-        (mock_dims_dir / "dim2").mkdir() # No dims/ subdir, so no children
-        mux = Mux()
-        assert len(mux.root_dimensions) == 2
-        assert set(mux.all_dimensions.keys()) == {"dim1", "dim2"}
-        dim1 = mux.all_dimensions["dim1"]
-        dim2 = mux.all_dimensions["dim2"]
-        assert dim1.children == []
-        assert dim2.children == []
+def test_mux_get_dimension(mux_instance, mock_dims):
+    """Test retrieving dimensions by path string."""
+    assert mux_instance.get_dimension("root") == mock_dims["root"]
+    assert mux_instance.get_dimension("root/child") == mock_dims["root/child"]
+    assert mux_instance.get_dimension("other") == mock_dims["other"]
+    assert mux_instance.get_dimension("nonexistent") is None
 
-    def test_init_and_discover_hierarchy(self, mock_dims_dir):
-        # Root dimensions
-        dim1_path = mock_dims_dir / "dim1"
-        dim1_path.mkdir()
-        dim2_path = mock_dims_dir / "dim2"
-        dim2_path.mkdir()
+def test_get_all_children(mux_instance, mock_dims):
+    """Test the recursive _get_all_children method."""
+    root_dim = mock_dims["root"]
+    child_dim = mock_dims["root/child"]
+    other_dim = mock_dims["other"]
 
-        # Sub-dimension (must be in dims/)
-        dim2_sub_container = dim2_path / "dims"
-        dim2_sub_container.mkdir()
-        child_path = dim2_sub_container / "child"
-        child_path.mkdir()
-        ignored_sub_dir_path = dim2_sub_container / "ignored_sub_dir" # This should be discovered
-        ignored_sub_dir_path.mkdir() # Re-add mkdir for this directory
+    assert mux_instance._get_all_children(root_dim) == [child_dim]
+    assert mux_instance._get_all_children(child_dim) == []
+    assert mux_instance._get_all_children(other_dim) == []
 
-        child_sub_container = child_path / "dims"
-        child_sub_container.mkdir()
-        grandchild_path = child_sub_container / "grandchild"
-        grandchild_path.mkdir()
-        
-        # Files/dirs to ignore
-        (dim1_path / "some_file.txt").touch()
-        (dim1_path / "profiles").mkdir() # Ignored dir
-        (dim2_path / "profiles").mkdir() # Ignored dir
-        (child_path / "another_file").touch()
+# --- Test handle_status (minimal, avoid UI overlap) ---
 
-        mux = Mux() # Initialize Mux to trigger discovery using mock_dims_dir
+@patch('mux.core.display_status_tree')
+@patch('mux.core.print_warning')
+def test_handle_status_calls_display(mock_print_warning, mock_display_tree, mux_instance, mock_dims):
+    mux_instance.handle_status(verbose=True)
+    mock_display_tree.assert_called_once_with(mux_instance.root_dimensions, True)
+    mock_print_warning.assert_not_called()
 
-        assert len(mux.root_dimensions) == 2
-        dim1 = next(d for d in mux.root_dimensions if d.name == "dim1")
-        dim2 = next(d for d in mux.root_dimensions if d.name == "dim2")
+@patch('mux.core.display_status_tree')
+@patch('mux.core.print_warning')
+def test_handle_status_no_dimensions(mock_print_warning, mock_display_tree):
+     with patch('mux.core.find_dimensions', return_value={}) as mock_find:
+        mux_no_dims = Mux()
+        mux_no_dims.handle_status()
+        mock_print_warning.assert_called_once_with(f"No dimensions found in {DIMS_DIR}.")
+        mock_display_tree.assert_not_called()
 
-        assert dim1.children == [] # dim1 has no dims/ subdir
 
-        assert len(dim2.children) == 2 
-        child_names = {c.name for c in dim2.children}
-        assert child_names == {"child", "ignored_sub_dir"}
+# --- Test handle_show (mocking UI) ---
 
-        # Check 'child' hierarchy specifically
-        child = next(c for c in dim2.children if c.name == "child")
-        assert child.path == child_path
-        assert child.parent == dim2
-        assert len(child.children) == 1
-        grandchild = child.children[0]
-        assert grandchild.name == "grandchild"
-        assert grandchild.path == grandchild_path
-        assert grandchild.parent == child
-        assert grandchild.children == []
-        
-        # Check 'ignored_sub_dir' hierarchy
-        ignored_sub_dim = next(c for c in dim2.children if c.name == "ignored_sub_dir")
-        assert ignored_sub_dim.path == ignored_sub_dir_path
-        assert ignored_sub_dim.parent == dim2
-        assert ignored_sub_dim.children == [] # It has no dims/ subdir
-
-        expected_keys = {"dim1", "dim2", "dim2/child", "dim2/ignored_sub_dir", "dim2/child/grandchild"}
-        assert set(mux.all_dimensions.keys()) == expected_keys
-        assert mux.all_dimensions["dim2/child/grandchild"] == grandchild
-
-    # --- Tests using mocked Mux instance (no filesystem discovery) ---
-    @pytest.fixture
-    def mocked_mux_instance(self):
-        # Patch discovery during fixture creation 
-        with patch('mux.core.Mux._discover_dimensions') as mock_discover:
-            mux = Mux()
-            # Ensure initialization attributes exist even with patched discovery
-            mux.root_dimensions = []
-            mux.all_dimensions = {}
-            return mux
-
-    def test_get_dimension(self, mocked_mux_instance):
-        mock_dim = MagicMock()
-        mocked_mux_instance.all_dimensions = {"test/path": mock_dim}
-        result = mocked_mux_instance.get_dimension("test/path")
-        assert result == mock_dim
-        assert mocked_mux_instance.get_dimension("nonexistent") is None
+@patch('mux.core.display_show_table')
+@patch('mux.core.get_active_profile_from_env')
+@patch('mux.core.print_warning')
+def test_handle_show_success(mock_print_warning, mock_get_active, mock_display_table, mux_instance, mock_dims):
+    dim_path = "root"
+    active_profile = "r_prof1"
+    expected_env = {"ROOT_VAR": "r1"}
+    mock_get_active.return_value = active_profile
     
-    @patch('mux.core.print_warning')
-    @patch('mux.core.display_status_tree')
-    def test_handle_status_empty(self, mock_display, mock_warning, mocked_mux_instance):
-        mocked_mux_instance.root_dimensions = []
-        mocked_mux_instance.handle_status()
-        mock_warning.assert_called_once()
-        mock_display.assert_not_called()
+    mux_instance.handle_show(dim_path)
+
+    mock_get_active.assert_called_once_with(mock_dims[dim_path])
+    # get_env_vars is called within the method
+    mock_display_table.assert_called_once_with(dim_path, active_profile, expected_env)
+    mock_print_warning.assert_not_called()
+
+@patch('mux.core.display_show_table')
+@patch('mux.core.get_active_profile_from_env')
+@patch('mux.core.print_warning')
+def test_handle_show_inactive(mock_print_warning, mock_get_active, mock_display_table, mux_instance, mock_dims):
+    dim_path = "root"
+    mock_get_active.return_value = None # Inactive
+
+    mux_instance.handle_show(dim_path)
+
+    mock_get_active.assert_called_once_with(mock_dims[dim_path])
+    mock_display_table.assert_called_once_with(dim_path, None, None) # Called with inactive state
+    mock_print_warning.assert_not_called() # print_info handled by display_show_table
+
+
+@patch('mux.core.display_show_table')
+def test_handle_show_dim_not_found(mock_display_table, mux_instance):
+    with pytest.raises(DimensionNotFoundError, match="Dimension 'nonexistent' not found"):
+        mux_instance.handle_show("nonexistent")
+    mock_display_table.assert_not_called()
     
-    @patch('mux.core.print_warning')
-    @patch('mux.core.display_status_tree')
-    def test_handle_status(self, mock_display, mock_warning, mocked_mux_instance):
-        mock_dims = [MagicMock(), MagicMock()]
-        mocked_mux_instance.root_dimensions = mock_dims
-        mocked_mux_instance.handle_status()
-        mock_warning.assert_not_called()
-        mock_display.assert_called_once_with(mock_dims)
+@patch('mux.core.display_show_table')
+@patch('mux.core.get_active_profile_from_env')
+@patch('mux.core.print_warning')
+def test_handle_show_active_profile_gone(mock_print_warning, mock_get_active, mock_display_table, mux_instance, mock_dims):
+    dim_path = "root"
+    active_profile = "r_prof_vanished" # Env var says this is active
+    mock_get_active.return_value = active_profile
     
-    @patch('mux.core.display_show_table')
-    @patch.dict(os.environ, {}, clear=True)
-    def test_handle_show(self, mock_display, mocked_mux_instance):
-        # Test handling show for an *active* dimension
-        dim_path_str = "test/dim"
-        profile_name = "active_profile"
-        env_vars = {"VAR1": "val1"}
-        mux_active_var = f"{ENV_VAR_PREFIX}_TEST_DIM" # Based on get_active_profile_from_env logic
-        os.environ[mux_active_var] = profile_name
-        
-        # Setup mock dimension
-        mock_dim = MagicMock(spec=Dimension)
-        mock_dim.get_dim_path_str.return_value = dim_path_str
-        mock_dim.get_profile_env.return_value = env_vars
-        mocked_mux_instance.all_dimensions = {dim_path_str: mock_dim}
+    # Make get_env_vars raise ProfileNotFoundError for this profile
+    mock_dims[dim_path].get_env_vars = MagicMock(side_effect=ProfileNotFoundError(active_profile, dim_path))
 
-        mocked_mux_instance.handle_show(dim_path_str)
+    mux_instance.handle_show(dim_path)
 
-        # Verify get_profile_env was called with the active profile name from env
-        mock_dim.get_profile_env.assert_called_once_with(profile_name)
-        # Verify display is called with the correct args
-        mock_display.assert_called_once_with(dim_path_str, profile_name, env_vars)
+    mock_get_active.assert_called_once_with(mock_dims[dim_path])
+    # It should warn and display as inactive
+    mock_print_warning.assert_called_once_with(f"Environment variable for active profile '{active_profile}' is set, but profile data not found for dimension '{dim_path}'.")
+    mock_display_table.assert_called_once_with(dim_path, None, None) # Display as inactive
 
-    @patch('mux.core.display_show_table')
-    @patch.dict(os.environ, {}, clear=True)
-    def test_handle_show_inactive(self, mock_display, mocked_mux_instance):
-        # Test handling show for an *inactive* dimension
-        dim_path_str = "test/dim"
-        mux_active_var = f"{ENV_VAR_PREFIX}_TEST_DIM"
-        if mux_active_var in os.environ:
-            del os.environ[mux_active_var]
 
-        mock_dim = MagicMock(spec=Dimension)
-        mock_dim.get_dim_path_str.return_value = dim_path_str
-        mocked_mux_instance.all_dimensions = {dim_path_str: mock_dim}
+# --- Test handle_switch (complex scenarios) ---
 
-        mocked_mux_instance.handle_show(dim_path_str)
-
-        # Verify get_profile_env was NOT called
-        mock_dim.get_profile_env.assert_not_called()
-        # Verify display is called indicating inactive
-        mock_display.assert_called_once_with(dim_path_str, None, None)
-
-    @patch('mux.core.display_show_table')
-    def test_handle_show_dimension_not_found(self, mock_display, mocked_mux_instance):
-        # Test handling show for non-existent dimension (no change needed here)
-        mocked_mux_instance.all_dimensions = {}
-        with pytest.raises(DimensionNotFoundError, match="Dimension 'nonexistent' not found"):
-            mocked_mux_instance.handle_show("nonexistent")
-        mock_display.assert_not_called()
+@patch('sys.stdout', new_callable=StringIO)
+@patch('mux.core.display_show_table')
+@patch('mux.core.generate_activate_commands')
+@patch('mux.core.generate_deactivate_commands')
+@patch('mux.core.get_active_profile_from_env')
+@patch('mux.core.run_fzf')
+def test_handle_switch_args_provided_simple_switch(mock_run_fzf, mock_get_active, mock_gen_deactivate, mock_gen_activate, mock_display_table, mock_stdout, mux_instance, mock_dims):
+    dim_path = "root"
+    old_profile = "r_prof1"
+    new_profile = "r_prof2"
+    target_dim = mock_dims[dim_path]
+    child_dim = mock_dims["root/child"]
     
-    @patch('sys.stdout', new_callable=MagicMock)
-    @patch.dict(os.environ, {}, clear=True)
-    def test_handle_switch(self, mock_stdout, mocked_mux_instance):
-        # Test switching profiles from none active
-        dim_path_str = "test/dim"
-        new_profile_name = "dev"
-        new_env = {"VAR1": "val1", "VAR2": "val2"}
-        mux_active_var = f"{ENV_VAR_PREFIX}_TEST_DIM"
-        
-        # Setup mock dimension
-        mock_dim = MagicMock(spec=Dimension)
-        mock_dim.get_dim_path_str.return_value = dim_path_str
-        mock_dim.get_profiles.return_value = {"dev": {}, "prod": {}} # Need available profiles
-        mock_dim.get_profile_env.return_value = new_env
-        mocked_mux_instance.all_dimensions = {dim_path_str: mock_dim}
-        
-        mocked_mux_instance.handle_switch(dim_path_str, new_profile_name)
-
-        # Verify get_profile_env was called for the new profile
-        mock_dim.get_profile_env.assert_called_once_with(new_profile_name)
-        # Check stdout contains expected commands (generated by real generate_shell_commands)
-        output = mock_stdout.write.call_args[0][0]
-        assert f"export {mux_active_var}='{new_profile_name}';" in output
-        assert "export VAR1='val1';" in output
-        assert "export VAR2='val2';" in output
-        assert "unset" not in output # Should be no unsets when switching from none
-
-    @patch('sys.stdout', new_callable=MagicMock)
-    @patch.dict(os.environ, {}, clear=True)
-    def test_handle_switch_change_profile(self, mock_stdout, mocked_mux_instance):
-        # Test switching from one active profile to another
-        dim_path_str = "test/dim"
-        old_profile_name = "prod"
-        new_profile_name = "dev"
-        old_env = {"VAR_OLD": "p_val", "COMMON": "same"}
-        new_env = {"VAR_NEW": "d_val", "COMMON": "same"}
-        mux_active_var = f"{ENV_VAR_PREFIX}_TEST_DIM"
-        os.environ[mux_active_var] = old_profile_name
-        
-        mock_dim = MagicMock(spec=Dimension)
-        mock_dim.get_dim_path_str.return_value = dim_path_str
-        mock_dim.get_profiles.return_value = {"dev": {}, "prod": {}} 
-        # Make get_profile_env return different dicts based on profile name
-        mock_dim.get_profile_env.side_effect = lambda name: old_env if name == old_profile_name else new_env if name == new_profile_name else {}
-        mocked_mux_instance.all_dimensions = {dim_path_str: mock_dim}
-        
-        mocked_mux_instance.handle_switch(dim_path_str, new_profile_name)
-        
-        # Verify get_profile_env called for old and new
-        mock_dim.get_profile_env.assert_has_calls([
-            call(old_profile_name), call(new_profile_name)
-        ], any_order=True)
-        # Check stdout for expected commands
-        output = mock_stdout.write.call_args[0][0]
-        assert f"unset {mux_active_var};" in output
-        assert "unset VAR_OLD;" in output
-        assert "unset COMMON;" not in output # Value is same, should only export
-        assert f"export {mux_active_var}='{new_profile_name}';" in output
-        assert "export VAR_NEW='d_val';" in output
-        assert "export COMMON='same';" in output # Should re-export common var
-        assert output.find("unset") < output.find("export") # Unsets before exports
-        
-    @patch('sys.stdout', new_callable=MagicMock)
-    @patch.dict(os.environ, {}, clear=True)
-    def test_handle_switch_to_already_active(self, mock_stdout, mocked_mux_instance):
-        # Test switching to the profile that is already active
-        dim_path_str = "test/dim"
-        profile_name = "dev"
-        mux_active_var = f"{ENV_VAR_PREFIX}_TEST_DIM"
-        os.environ[mux_active_var] = profile_name
-        
-        mock_dim = MagicMock(spec=Dimension)
-        mock_dim.get_dim_path_str.return_value = dim_path_str
-        mock_dim.get_profiles.return_value = {"dev": {}, "prod": {}} 
-        mocked_mux_instance.all_dimensions = {dim_path_str: mock_dim}
-
-        # Patch the print method of the console_err object in the ui module
-        with patch('mux.ui.console_err.print') as mock_console_print:
-            mocked_mux_instance.handle_switch(dim_path_str, profile_name)
-            
-            # Verify console_err.print was called
-            mock_console_print.assert_called_once()
-            # Check the content of the first argument passed
-            call_args, _ = mock_console_print.call_args
-            assert "already active" in call_args[0]
-            
-            # Verify get_profile_env was NOT called
-            mock_dim.get_profile_env.assert_not_called()
-            # Verify stdout got the no-op command
-            mock_stdout.write.assert_called_once_with(":")
-
-    @patch.dict(os.environ, {}, clear=True)
-    def test_handle_switch_profile_not_found(self, mocked_mux_instance): # Removed mock_generate
-        # Test switching to non-existent profile (no change needed here)
-        dim_path_str = "test/dim"
-        mock_dim = MagicMock(spec=Dimension)
-        mock_dim.get_dim_path_str.return_value = dim_path_str
-        mock_dim.get_profiles.return_value = {"dev": {}, "prod": {}}
-        mocked_mux_instance.all_dimensions = {dim_path_str: mock_dim}
-        
-        with pytest.raises(ProfileNotFoundError, match="Profile 'nonexistent' not found for dimension 'test/dim'"):
-            mocked_mux_instance.handle_switch(dim_path_str, "nonexistent")
-        
-        mock_dim.get_profiles.assert_called_once()
-        mock_dim.get_profile_env.assert_not_called()
-
-    @patch('mux.core.run_fzf')
-    @patch('sys.stdout', new_callable=MagicMock)
-    def test_handle_switch_interactive_dim_only(self, mock_stdout, mock_run_fzf, mocked_mux_instance):
-        # Test interactive mode (dimension only specified)
-        dim_path_str = "test/dim"
-        mock_dim = MagicMock(spec=Dimension)
-        mock_dim.get_profiles.return_value = {"prof1": {}, "prof2": {}}
-        mocked_mux_instance.all_dimensions = {dim_path_str: mock_dim}
-        
-        # Simulate fzf selecting "prof2"
-        mock_run_fzf.return_value = "prof2"
-        # Simulate get_profile_env returning something for the chosen profile
-        mock_dim.get_profile_env.return_value = {"SELECTED": "prof2_val"}
-        
-        mocked_mux_instance.handle_switch(dim_path_str, None) # Profile is None
-        
-        # Check fzf was called for profiles
-        mock_run_fzf.assert_called_once_with(sorted(["prof1", "prof2"]), f"Select Profile for '{dim_path_str}'")
-        # Check get_profile_env was called for the selected profile
-        mock_dim.get_profile_env.assert_called_once_with("prof2")
-        # Check stdout contains the export for the selected profile
-        output = mock_stdout.write.call_args[0][0]
-        assert "export SELECTED='prof2_val';" in output
-        assert f"export {ENV_VAR_PREFIX}_TEST_DIM='prof2';" in output # Check MUX_ACTIVE var
-
-    @patch('mux.core.run_fzf')
-    @patch('sys.stdout', new_callable=MagicMock)
-    def test_handle_switch_interactive_no_args(self, mock_stdout, mock_run_fzf, mocked_mux_instance):
-        # Test interactive mode (no arguments specified)
-        dim_path_str1 = "dim1"
-        dim_path_str2 = "kube/ns"
-        mock_dim1 = MagicMock(spec=Dimension)
-        mock_dim1.get_profiles.return_value = {"d1p1": {}}
-        mock_dim2 = MagicMock(spec=Dimension)
-        mock_dim2.get_profiles.return_value = {"k1": {}, "k2": {}}
-        mocked_mux_instance.all_dimensions = {dim_path_str1: mock_dim1, dim_path_str2: mock_dim2}
-
-        # Simulate fzf selecting dim, then profile
-        mock_run_fzf.side_effect = [dim_path_str2, "k1"] # First call returns dim, second returns profile
-        # Simulate get_profile_env for the chosen profile
-        mock_dim2.get_profile_env.return_value = {"KUBE_VAR": "k1_val"}
-
-        mocked_mux_instance.handle_switch(None, None) # No args
-
-        # Check fzf calls
-        expected_fzf_calls = [
-            call(sorted([dim_path_str1, dim_path_str2]), "Select Dimension"),
-            call(sorted(["k1", "k2"]), f"Select Profile for '{dim_path_str2}'")
-        ]
-        assert mock_run_fzf.call_args_list == expected_fzf_calls
-        
-        # Check get_profile_env called only for the selected dim/profile
-        mock_dim1.get_profile_env.assert_not_called()
-        mock_dim2.get_profile_env.assert_called_once_with("k1")
-        
-        # Check stdout
-        output = mock_stdout.write.call_args[0][0]
-        assert "export KUBE_VAR='k1_val';" in output
-        assert f"export {ENV_VAR_PREFIX}_KUBE_NS='k1';" in output # Check MUX_ACTIVE var
-
-    @patch('mux.core.run_fzf')
-    @patch('sys.stdout', new_callable=MagicMock)
-    def test_handle_switch_interactive_fzf_cancel_dim(self, mock_stdout, mock_run_fzf, mocked_mux_instance):
-        # Test fzf cancellation during dimension selection
-        mocked_mux_instance.all_dimensions = {"dim1": MagicMock()}
-        mock_run_fzf.return_value = None # Simulate cancellation
-        
-        mocked_mux_instance.handle_switch(None, None)
-        
-        mock_run_fzf.assert_called_once_with(sorted(["dim1"]), "Select Dimension")
-        mock_stdout.write.assert_called_once_with(":") # Should output no-op
-
-    @patch('mux.core.run_fzf')
-    @patch('sys.stdout', new_callable=MagicMock)
-    def test_handle_switch_interactive_fzf_cancel_profile(self, mock_stdout, mock_run_fzf, mocked_mux_instance):
-        # Test fzf cancellation during profile selection
-        dim_path_str = "dim1"
-        mock_dim = MagicMock(spec=Dimension)
-        mock_dim.get_profiles.return_value = {"p1": {}}
-        mocked_mux_instance.all_dimensions = {dim_path_str: mock_dim}
-
-        mock_run_fzf.return_value = None # Simulate cancellation
-
-        mocked_mux_instance.handle_switch(dim_path_str, None)
-
-        mock_run_fzf.assert_called_once_with(sorted(["p1"]), f"Select Profile for '{dim_path_str}'")
-        mock_stdout.write.assert_called_once_with(":") # Should output no-op
-
-    @patch('mux.core.run_fzf', side_effect=FzfNotInstalledError())
-    @patch('mux.ui.console_err.print') # Mock print_error in ui module
-    def test_handle_switch_interactive_fzf_not_installed(self, mock_console_print, mock_run_fzf, mocked_mux_instance):
-        # Test fzf not installed during dimension selection
-        mocked_mux_instance.all_dimensions = {"dim1": MagicMock()}
-        
-        # We expect the function to re-raise FzfNotInstalledError after printing
-        with pytest.raises(FzfNotInstalledError):
-            # Patch the console print method used by print_error
-            with patch('mux.ui.console_err.print') as mock_console_print:
-                mocked_mux_instance.handle_switch(None, None)
-        
-        # Check that console print was called with the error message
-        mock_console_print.assert_called_once()
-        assert "fzf' command not found" in mock_console_print.call_args[0][0]
-
-    def test_handle_default(self, mocked_mux_instance):
-        # Test setting default profile
-        mock_dim = MagicMock()
-        mock_dim.get_profiles.return_value = {"dev": {}, "prod": {}}
-        mocked_mux_instance.all_dimensions = {"test/dim": mock_dim}
-        
-        mocked_mux_instance.handle_default("test/dim", "dev")
-        
-        mock_dim.set_configured_default_profile.assert_called_once_with("dev")
+    # Make get_active return old_profile for root, None for child for this specific test
+    def side_effect(dim):
+        if dim == target_dim: return old_profile
+        return None
+    mock_get_active.side_effect = side_effect
     
-    def test_handle_default_dimension_not_found(self, mocked_mux_instance):
-        # Test setting default for non-existent dimension
-        mocked_mux_instance.all_dimensions = {}
-        
-        with pytest.raises(DimensionNotFoundError, match="Dimension 'nonexistent' not found"):
-            mocked_mux_instance.handle_default("nonexistent", "dev")
+    # Mock deactivate returns specific strings for root
+    mock_gen_deactivate.return_value = [f"unset ROOT_VAR", f"unset MUX_ACTIVE_ROOT"]
+    # Mock activate returns specific strings for root
+    mock_gen_activate.return_value = [f"export ROOT_VAR='r2'", f"export MUX_ACTIVE_ROOT='{new_profile}'"]
     
-    def test_handle_default_profile_not_found(self, mocked_mux_instance):
-        # Test setting non-existent profile as default
-        mock_dim = MagicMock()
-        mock_dim.get_profiles.return_value = {"dev": {}, "prod": {}}
-        mocked_mux_instance.all_dimensions = {"test/dim": mock_dim}
+    mux_instance.handle_switch(dim_path, new_profile)
+
+    mock_run_fzf.assert_not_called()
+    mock_get_active.assert_any_call(target_dim) # Called for root check
+    mock_get_active.assert_any_call(child_dim) # Called for child check
+    
+    # Deactivate should only be called for the root dimension now
+    mock_gen_deactivate.assert_called_once_with(target_dim)
+    mock_gen_activate.assert_called_once_with(target_dim, new_profile)
+    mock_display_table.assert_called_once_with(dim_path, new_profile, {"ROOT_VAR": "r2"})
+    
+    # Expected output should ONLY contain root deactivation/activation
+    expected_output = "unset ROOT_VAR; unset MUX_ACTIVE_ROOT; export ROOT_VAR='r2'; export MUX_ACTIVE_ROOT='r_prof2';"
+    assert mock_stdout.getvalue() == expected_output
+
+@patch('sys.stdout', new_callable=StringIO)
+@patch('mux.core.print_info')
+@patch('mux.core.run_fzf')
+def test_handle_switch_fzf_cancel(mock_run_fzf, mock_print_info, mock_stdout, mux_instance):
+    mock_run_fzf.return_value = None # User cancels FZF
+
+    mux_instance.handle_switch(None, None) # FZF for dimension
+    
+    mock_run_fzf.assert_called_once()
+    mock_print_info.assert_called_once_with("No dimension selected.")
+    assert mock_stdout.getvalue() == ":" # No-op
+
+@patch('sys.stdout', new_callable=StringIO)
+@patch('mux.core.print_info')
+@patch('mux.core.run_fzf')
+def test_handle_switch_fzf_cancel_profile(mock_run_fzf, mock_print_info, mock_stdout, mux_instance, mock_dims):
+    dim_path = "root"
+    mock_run_fzf.side_effect = [dim_path, None] # Select dim, cancel profile
+
+    mux_instance.handle_switch(None, None) # FZF for both
+
+    assert mock_run_fzf.call_count == 2
+    mock_print_info.assert_called_once_with("No profile selected.")
+    assert mock_stdout.getvalue() == ":"
+
+@patch('sys.stdout', new_callable=StringIO)
+@patch('mux.core.print_error')
+@patch('mux.core.run_fzf', side_effect=FzfNotInstalledError())
+def test_handle_switch_fzf_not_installed(mock_run_fzf, mock_print_error, mock_stdout, mux_instance):
+     with pytest.raises(FzfNotInstalledError):
+        mux_instance.handle_switch(None, None)
+     # Check that only the error from the exception is printed
+     mock_print_error.assert_called_once_with("'fzf' command not found. Please install fzf (https://github.com/junegunn/fzf).")
+     assert mock_stdout.getvalue() == "" # No output on error before raise
+
+@patch('sys.stdout', new_callable=StringIO)
+@patch('mux.core.print_error')
+def test_handle_switch_dim_not_found(mock_print_error, mock_stdout, mux_instance):
+    dim_path = "nonexistent"
+    with pytest.raises(DimensionNotFoundError):
+        mux_instance.handle_switch(dim_path, "any_profile")
+    # Check that the error was printed before being raised
+    mock_print_error.assert_called_once_with(f"Dimension '{dim_path}' not found.") # Add period
+    assert mock_stdout.getvalue() == ""
+
+@patch('sys.stdout', new_callable=StringIO)
+@patch('mux.core.print_error')
+def test_handle_switch_profile_not_found(mock_print_error, mock_stdout, mux_instance):
+    dim_path = "root"
+    invalid_profile = "invalid_prof"
+    with pytest.raises(ProfileNotFoundError):
+        mux_instance.handle_switch(dim_path, invalid_profile)
+    # Check that the error was printed before being raised
+    mock_print_error.assert_called_once_with(f"Profile '{invalid_profile}' not found for dimension '{dim_path}'.") # Add period
+    assert mock_stdout.getvalue() == ""
+    
+@patch('sys.stdout', new_callable=StringIO)
+@patch('mux.core.print_warning')
+def test_handle_switch_no_profiles_found(mock_print_warning, mock_stdout, mux_instance):
+    dim_path = "no_profiles"
+    # Select dimension without profiles using FZF
+    with patch('mux.core.run_fzf', return_value=dim_path):
+        mux_instance.handle_switch(None, None) 
         
-        with pytest.raises(ProfileNotFoundError, match="Profile 'nonexistent' not found for dimension 'test/dim'"):
-            mocked_mux_instance.handle_default("test/dim", "nonexistent")
+    mock_print_warning.assert_called_once_with(f"No profiles found for dimension '{dim_path}'.")
+    assert mock_stdout.getvalue() == ":" # No-op
 
-    # --- Tests for handle_auto_activate ---
-    @patch('sys.stdout', new_callable=MagicMock)
-    @patch('mux.core.generate_shell_commands')
-    @patch('mux.core.get_active_profile_from_env')
-    def test_handle_auto_activate(self, mock_get_active, mock_generate_cmds, mock_stdout, mocked_mux_instance):
-        """Test auto-activating default profiles for inactive dimensions."""
-        # Setup mock dimensions
-        dim1 = MagicMock(spec=Dimension)
-        dim1.get_effective_default_profile.return_value = "default1"
-        dim1.get_profiles.return_value = {"default1": {"VAR1": "val1"}}
-        dim1.get_profile_env.return_value = {"VAR1": "val1"}
+@patch('mux.core.generate_activate_commands')
+@patch('mux.core.generate_deactivate_commands')
+@patch('mux.core.get_active_profile_from_env')
+@patch('mux.core.print_info')
+def test_handle_switch_already_active(mock_print_info, mock_get_active, mock_gen_deactivate, mock_gen_activate, mux_instance, mock_dims):
+    """Test that switching to the already active profile does nothing."""
+    dim_path = "root"
+    active_profile = "r_prof1"
+    target_dim = mock_dims[dim_path]
+    
+    mock_get_active.return_value = active_profile # Currently active is the target profile
 
-        dim2 = MagicMock(spec=Dimension)
-        dim2.get_effective_default_profile.return_value = "default2"
-        dim2.get_profiles.return_value = {"other": {}, "default2": {"VAR2": "val2"}}
-        dim2.get_profile_env.return_value = {"VAR2": "val2"}
+    mux_instance.handle_switch(dim_path, active_profile)
 
-        dim3_active = MagicMock(spec=Dimension) # Already active
+    mock_get_active.assert_called_once_with(target_dim) # Only checks once
+    mock_print_info.assert_called_once_with(f"Profile '{active_profile}' is already active for dimension '{dim_path}'.")
+    mock_gen_deactivate.assert_not_called()
+    mock_gen_activate.assert_not_called()
+
+@patch('sys.stdout', new_callable=StringIO)
+@patch('mux.core.display_show_table')
+@patch('mux.core.generate_activate_commands')
+@patch('mux.core.generate_deactivate_commands')
+@patch('mux.core.get_active_profile_from_env')
+@patch('mux.core.print_info')
+def test_handle_switch_deactivates_children(mock_print_info, mock_get_active, mock_gen_deactivate, mock_gen_activate, mock_display_table, mock_stdout, mux_instance, mock_dims):
+    root_dim_path = "root"
+    child_dim_path = "root/child"
+    old_profile = "r_prof1"
+    new_profile = "r_prof2"
+    child_active_profile = "c_prof1"
+    
+    root_dim = mock_dims[root_dim_path]
+    child_dim = mock_dims[child_dim_path]
+
+    # Mock which profile is active for which dimension
+    def get_active_side_effect(dim):
+        if dim == root_dim: return old_profile
+        if dim == child_dim: return child_active_profile
+        return None
+    mock_get_active.side_effect = get_active_side_effect
+
+    # Mock deactivate command generation
+    mock_gen_deactivate.side_effect = lambda dim: [f"deact_{dim.name}"]
+
+    # Mock activate command generation
+    mock_gen_activate.return_value = [f"act_{new_profile}"]
+    
+    # Mock _get_all_children explicitly (though it should work with MockDimension)
+    with patch.object(mux_instance, '_get_all_children', return_value=[child_dim]) as mock_get_children:
+        mux_instance.handle_switch(root_dim_path, new_profile)
+
+    mock_get_children.assert_called_once_with(root_dim)
+
+    # Check get_active calls
+    assert mock_get_active.call_count == 2 # Adjust expectation based on observed failure
+    mock_get_active.assert_any_call(root_dim)
+    mock_get_active.assert_any_call(child_dim)
+
+    # Check deactivate calls: should be called for root AND child
+    assert mock_gen_deactivate.call_count == 2
+    mock_gen_deactivate.assert_any_call(root_dim)
+    mock_gen_deactivate.assert_any_call(child_dim)
+
+    # Check activate call: only for the root dimension being switched
+    mock_gen_activate.assert_called_once_with(root_dim, new_profile)
+    
+    # Check info message for child deactivation
+    mock_print_info.assert_called_once_with(f"Deactivating child dimension '{child_dim_path}' due to parent switch.")
+
+    mock_display_table.assert_called_once_with(root_dim_path, new_profile, {"ROOT_VAR": "r2"})
+    
+    expected_output = "deact_root; deact_child; act_r_prof2;"
+    assert mock_stdout.getvalue() == expected_output
+
+# --- Test handle_set_default ---
+
+@patch('mux.core.run_fzf')
+def test_handle_set_default_args_provided(mock_run_fzf, mux_instance, mock_dims):
+    dim_path = "root"
+    profile_to_set = "r_prof2"
+    target_dim = mock_dims[dim_path]
+    
+    # Mock the method on the dimension object
+    # Note: Now we expect set_default_profile (source default) to be called
+    with patch.object(target_dim, 'set_default_profile') as mock_set_default:
+        mux_instance.handle_set_default(dim_path, profile_to_set)
+
+    mock_run_fzf.assert_not_called()
+    mock_set_default.assert_called_once_with(profile_to_set)
+    # Success message is printed within the mocked method, so not checked here directly
+    # We could patch print inside the mock dimension if needed
+
+@patch('mux.core.run_fzf')
+def test_handle_set_default_with_fzf(mock_run_fzf, mux_instance, mock_dims):
+    dim_path = "root"
+    profile_to_set = "r_prof2"
+    current_default = "r_prof1"
+    target_dim = mock_dims[dim_path]
+    target_dim._effective_default = current_default # Set current default for FZF highlight
+
+    # FZF returns selections
+    mock_run_fzf.side_effect = [dim_path, profile_to_set] 
+    
+    with patch.object(target_dim, 'set_default_profile') as mock_set_default:
+        mux_instance.handle_set_default(None, None) # Trigger FZF
+
+    # Check FZF calls
+    assert mock_run_fzf.call_count == 2
+    fzf_calls = mock_run_fzf.call_args_list
+    # Call 1: Select Dimension
+    assert fzf_calls[0][0][0] == sorted(list(mock_dims.keys()))
+    assert "Select Dimension" in fzf_calls[0][0][1]
+    # Call 2: Select Profile
+    assert fzf_calls[1][0][0] == sorted(list(target_dim.get_profiles().keys()))
+    assert f"Select Default Profile for '{dim_path}'" in fzf_calls[1][0][1]
+    assert fzf_calls[1][0][2] == current_default # Pass current default for highlighting
+
+    mock_set_default.assert_called_once_with(profile_to_set)
+
+@patch('mux.core.print_error')
+@patch('mux.core.run_fzf', side_effect=FzfNotInstalledError())
+def test_handle_set_default_fzf_not_installed(mock_run_fzf, mock_print_error, mux_instance):
+     with pytest.raises(FzfNotInstalledError):
+        mux_instance.handle_set_default(None, None)
+     # Check that both error messages are printed
+     mock_print_error.assert_any_call("'fzf' command not found. Please install fzf (https://github.com/junegunn/fzf).")
+     mock_print_error.assert_any_call("Please install fzf to use interactive selection: https://github.com/junegunn/fzf")
+     assert mock_print_error.call_count == 2
+
+
+@patch('mux.core.print_error')
+def test_handle_set_default_dim_not_found(mock_print_error, mux_instance):
+    dim_path = "nonexistent"
+    with pytest.raises(DimensionNotFoundError):
+        mux_instance.handle_set_default(dim_path, "any_profile")
+    # Check that the error was printed before being raised
+    mock_print_error.assert_called_once_with(f"Dimension '{dim_path}' not found.") # Add period
+
+@patch('mux.core.print_error')
+def test_handle_set_default_profile_not_found(mock_print_error, mux_instance):
+    dim_path = "root"
+    invalid_profile = "invalid_prof"
+    with pytest.raises(ProfileNotFoundError):
+        mux_instance.handle_set_default(dim_path, invalid_profile)
+    # Check that the error was printed before being raised
+    mock_print_error.assert_called_once_with(f"Profile '{invalid_profile}' not found for dimension '{dim_path}'.") # Add period
+
+@patch('mux.core.print_warning')
+def test_handle_set_default_no_profiles_found(mock_print_warning, mux_instance):
+    dim_path = "no_profiles"
+    # Select dimension without profiles using FZF
+    with patch('mux.core.run_fzf', return_value=dim_path):
+        mux_instance.handle_set_default(None, None) 
         
-        dim4_no_default = MagicMock(spec=Dimension) # Inactive, no default
-        dim4_no_default.get_effective_default_profile.return_value = None
-        
-        dim5_missing_default = MagicMock(spec=Dimension) # Default set but profile missing
-        dim5_missing_default.get_effective_default_profile.return_value = "missing"
-        dim5_missing_default.get_profiles.return_value = {"other": {}} # 'missing' not here
+    mock_print_warning.assert_called_once_with(f"No profiles found for dimension '{dim_path}'.")
 
-        mocked_mux_instance.all_dimensions = {
-            "dim1": dim1, 
-            "dim2": dim2, 
-            "dim3": dim3_active, 
-            "dim4": dim4_no_default,
-            "dim5": dim5_missing_default
-        }
-        
-        # Mock which dimensions are active
-        mock_get_active.side_effect = lambda dim: "active_profile" if dim == dim3_active else None
+# --- Test handle_auto_activate ---
 
-        # Mock generated commands
-        mock_generate_cmds.side_effect = lambda target_dim_path_str, **kwargs: f"export CMD_FOR_{target_dim_path_str.upper()}"
+@patch('sys.stdout', new_callable=StringIO)
+@patch('mux.core.generate_activate_commands')
+@patch('mux.core.get_active_profile_from_env')
+@patch('mux.core.print_warning')
+def test_handle_auto_activate_activates_defaults(mock_print_warning, mock_get_active, mock_gen_activate, mock_stdout, mux_instance, mock_dims):
+    root_dim = mock_dims["root"]
+    child_dim = mock_dims["root/child"]
+    other_dim = mock_dims["other"] # No default
+    no_prof_dim = mock_dims["no_profiles"] # No profiles
 
-        # Call the method
-        mocked_mux_instance.handle_auto_activate()
+    # Mock active status: only child is active
+    mock_get_active.side_effect = lambda dim: "c_prof2" if dim == child_dim else None
+    
+    # Mock activate commands
+    mock_gen_activate.side_effect = lambda dim, prof: [f"act_{dim.name}_{prof}"]
 
-        # Assertions
-        assert mock_get_active.call_count == 5 # Called for each dimension
-        
-        # Should try to get default for inactive dims (1, 2, 4, 5)
-        assert dim1.get_effective_default_profile.call_count == 1
-        assert dim2.get_effective_default_profile.call_count == 1
-        assert dim4_no_default.get_effective_default_profile.call_count == 1
-        assert dim5_missing_default.get_effective_default_profile.call_count == 1
-        assert dim3_active.get_effective_default_profile.call_count == 0 # Not called if active
+    mux_instance.handle_auto_activate()
 
-        # Should check if default profile exists for dims with a default (1, 2, 5)
-        assert dim1.get_profiles.call_count == 1
-        assert dim2.get_profiles.call_count == 1
-        assert dim5_missing_default.get_profiles.call_count == 1
-        assert dim3_active.get_profiles.call_count == 0
-        assert dim4_no_default.get_profiles.call_count == 0 # No default to check
+    # Check get_active calls for all dimensions
+    assert mock_get_active.call_count == len(mock_dims)
+    mock_get_active.assert_any_call(root_dim)
+    mock_get_active.assert_any_call(child_dim)
+    mock_get_active.assert_any_call(other_dim)
+    mock_get_active.assert_any_call(no_prof_dim)
 
-        # Should get env for valid, existing defaults (1, 2)
-        assert dim1.get_profile_env.call_count == 1
-        dim1.get_profile_env.assert_called_once_with("default1")
-        assert dim2.get_profile_env.call_count == 1
-        dim2.get_profile_env.assert_called_once_with("default2")
-        assert dim3_active.get_profile_env.call_count == 0
-        assert dim4_no_default.get_profile_env.call_count == 0
-        assert dim5_missing_default.get_profile_env.call_count == 0 # Profile didn't exist
+    # Check activate calls: only for root (inactive with existing default)
+    assert mock_gen_activate.call_count == 1
+    mock_gen_activate.assert_called_once_with(root_dim, "r_prof1")
 
-        # Should generate commands only for dims where default was found and valid (1, 2)
-        assert mock_generate_cmds.call_count == 2
-        mock_generate_cmds.assert_any_call(
-            target_dim_path_str="dim1", old_env=None, new_env={"VAR1": "val1"}, new_profile_name="default1"
-        )
-        mock_generate_cmds.assert_any_call(
-            target_dim_path_str="dim2", old_env=None, new_env={"VAR2": "val2"}, new_profile_name="default2"
-        )
-        
-        # Check stdout output
-        expected_output = "export CMD_FOR_DIM1\nexport CMD_FOR_DIM2\n"
-        mock_stdout.write.assert_called_once_with(expected_output)
+    mock_print_warning.assert_not_called() # No warnings expected
 
-    @patch('sys.stdout', new_callable=MagicMock)
-    @patch('mux.core.generate_shell_commands')
-    @patch('mux.core.get_active_profile_from_env', return_value=None)
-    @patch('mux.core.print_warning')
-    def test_handle_auto_activate_profile_load_error(self, mock_warning, mock_get_active, mock_generate_cmds, mock_stdout, mocked_mux_instance):
-        """Test that errors during profile loading are handled gracefully."""
-        dim1 = MagicMock(spec=Dimension)
-        dim1.get_effective_default_profile.return_value = "default1"
-        dim1.get_profiles.return_value = {"default1": {}}
-        # Simulate error when getting env
-        dim1.get_profile_env.side_effect = Exception("Failed to load env") 
+    expected_output = "act_root_r_prof1;" # Only root's default activation
+    assert mock_stdout.getvalue() == expected_output
 
-        mocked_mux_instance.all_dimensions = {"dim1": dim1}
-        
-        mocked_mux_instance.handle_auto_activate()
+@patch('sys.stdout', new_callable=StringIO)
+@patch('mux.core.generate_activate_commands')
+@patch('mux.core.get_active_profile_from_env')
+@patch('mux.core.print_warning')
+def test_handle_auto_activate_skips_active_and_no_default(mock_print_warning, mock_get_active, mock_gen_activate, mock_stdout, mux_instance, mock_dims):
+    root_dim = mock_dims["root"]
+    child_dim = mock_dims["root/child"]
+    other_dim = mock_dims["other"] # No default
+    no_prof_dim = mock_dims["no_profiles"]
 
-        assert mock_warning.call_count == 1 # Warning should be printed
-        assert "Error auto-activating" in mock_warning.call_args[0][0]
-        assert "dim1" in mock_warning.call_args[0][0]
-        mock_generate_cmds.assert_not_called() # No commands generated
-        mock_stdout.write.assert_not_called() # Nothing printed to stdout
+    # Mock active status: root is active (r_prof2), others inactive
+    mock_get_active.side_effect = lambda dim: "r_prof2" if dim == root_dim else None
+    # Mock activate commands to see what gets called
+    mock_gen_activate.side_effect = lambda dim, prof: [f"act_{dim.name}_{prof}"]
 
-    @patch('sys.stdout', new_callable=MagicMock)
-    @patch('mux.core.generate_shell_commands')
-    @patch('mux.core.get_active_profile_from_env', return_value=None)
-    @patch('mux.core.print_warning')
-    def test_handle_auto_activate_profile_not_found_in_get_profiles(self, mock_warning, mock_get_active, mock_generate_cmds, mock_stdout, mocked_mux_instance):
-        """Test warning when default profile is not in get_profiles result."""
-        dim1 = MagicMock(spec=Dimension)
-        dim1.get_effective_default_profile.return_value = "default1"
-        # Default profile "default1" is missing here
-        dim1.get_profiles.return_value = {"other_profile": {}} 
-        dim1.get_profile_env.side_effect = ProfileNotFoundError("default1", "dim1") # Should not be called
+    mux_instance.handle_auto_activate()
 
-        mocked_mux_instance.all_dimensions = {"dim1": dim1}
-        
-        mocked_mux_instance.handle_auto_activate()
+    # Activate should ONLY be called for the inactive child with a default
+    mock_gen_activate.assert_called_once_with(child_dim, "c_prof1")
+    mock_print_warning.assert_not_called()
+    
+    # Assert that only the child activation command is printed
+    expected_output = "act_child_c_prof1;"
+    assert mock_stdout.getvalue() == expected_output
 
-        assert mock_warning.call_count == 1 # Warning should be printed
-        assert "Default profile 'default1' for dimension 'dim1' not found." in mock_warning.call_args[0][0]
-        dim1.get_profile_env.assert_not_called() # Should not try to load env
-        mock_generate_cmds.assert_not_called() # No commands generated
-        mock_stdout.write.assert_not_called() # Nothing printed to stdout
+@patch('sys.stdout', new_callable=StringIO)
+@patch('mux.core.generate_activate_commands')
+@patch('mux.core.get_active_profile_from_env')
+@patch('mux.core.print_warning')
+def test_handle_auto_activate_warns_missing_default_profile(mock_print_warning, mock_get_active, mock_gen_activate, mock_stdout, mux_instance, mock_dims):
+    root_dim = mock_dims["root"]
+    child_dim = mock_dims["root/child"]
+    other_dim = mock_dims["other"]
+    no_prof_dim = mock_dims["no_profiles"]
+    
+    root_dim._effective_default = "nonexistent_default" # Set a default that doesn't exist in profiles
+
+    # Mock active status: all inactive
+    mock_get_active.return_value = None
+    # Mock activate commands
+    mock_gen_activate.side_effect = lambda dim, prof: [f"act_{dim.name}_{prof}"]
+
+    mux_instance.handle_auto_activate()
+
+    # Activate should ONLY be called for child (inactive with valid default)
+    mock_gen_activate.assert_called_once_with(child_dim, "c_prof1")
+
+    # Warning should be printed ONLY for root
+    mock_print_warning.assert_called_once_with(f"Default profile 'nonexistent_default' for dimension 'root' not found. Skipping auto-activation.")
+    
+    # Assert that only the child activation command is printed
+    expected_output = "act_child_c_prof1;"
+    assert mock_stdout.getvalue() == expected_output

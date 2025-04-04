@@ -39,7 +39,7 @@ def print_info(message: str):
      console_err.print(f"[dim]{message}[/dim]")
 
 # Recursive helper function to build the status tree
-def _build_status_tree(tree: Tree, dimension: 'Dimension'):
+def _build_status_tree(tree: Tree, dimension: 'Dimension', verbose: bool = False):
     """Recursively builds the Rich Tree for dimensions."""
     active_profile = get_active_profile_from_env(dimension)
     effective_default = dimension.get_effective_default_profile() # Method exists
@@ -66,20 +66,41 @@ def _build_status_tree(tree: Tree, dimension: 'Dimension'):
     # Add node for the current dimension
     branch = tree.add(label)
 
+    # Add all available profiles if in verbose mode
+    if verbose:
+        profiles = dimension.get_profiles()
+        if profiles:
+            profiles_branch = branch.add(Text("Profiles", style="dim cyan"))
+            for profile_name in sorted(profiles.keys()):
+                if profile_name == active_profile:
+                    # Highlight active profile
+                    profile_label = Text.from_markup(f"[bold green]{profile_name}[/bold green] [dim](active)[/dim]")
+                elif profile_name == effective_default and profile_name != active_profile:
+                    # Highlight default profile
+                    profile_label = Text.from_markup(f"[dim yellow]{profile_name}[/dim yellow] [dim](default)[/dim]")
+                else:
+                    # Regular profile
+                    profile_label = Text(profile_name)
+                profiles_branch.add(profile_label)
+
     # Recursively add children
     for child in sorted(dimension.children, key=lambda d: d.name):
-        _build_status_tree(branch, child)
+        _build_status_tree(branch, child, verbose)
 
 
-def display_status_tree(root_dimensions: List['Dimension']):
+def display_status_tree(root_dimensions: List['Dimension'], verbose: bool = False):
      """Displays the dimension status as a tree."""
      if not root_dimensions:
           print_warning("No dimensions found to display status for.")
           return
 
-     tree = Tree("[bold cyan]Dimension Status[/bold cyan]", guide_style="dim")
+     title = "[bold cyan]Dimension Status[/bold cyan]"
+     if verbose:
+         title += " [dim](verbose)[/dim]"
+         
+     tree = Tree(title, guide_style="dim")
      for dim in sorted(root_dimensions, key=lambda d: d.name):
-         _build_status_tree(tree, dim)
+         _build_status_tree(tree, dim, verbose)
      console_err.print(tree)
 
 
@@ -94,14 +115,12 @@ def display_show_table(dim_path: str, active_profile: Optional[str], env_vars: O
           return
 
      table = Table(
-          title=f"Environment for [cyan]{dim_path}[/] (Profile: [green]{active_profile}[/])",
+          title=f"Active Environment for [bold white]'{dim_path}'[/bold white] ([bold green]{active_profile}[/bold green])",
           show_header=True,
-          header_style="bold magenta",
-          box=None, # Use a simpler box style or None
-          padding=(0, 1) # Less vertical padding
+          header_style="bold magenta"
      )
-     table.add_column("Variable", style="dim", width=30)
-     table.add_column("Value")
+     table.add_column("Variable Name", style="dim cyan", width=30)
+     table.add_column("Current Value", style="white")
 
      for key, value in sorted(env_vars.items()):
           table.add_row(key, value)

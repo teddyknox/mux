@@ -154,7 +154,28 @@ def test_display_status_tree_nested(mock_get_active, mock_console_print):
     # output_str = str(output_obj)
 
 @patch('mux.ui.console_err.print')
-@patch('mux.ui.print_warning') # To check the warning message
+@patch('mux.ui.get_active_profile_from_env')
+def test_display_status_tree_verbose(mock_get_active, mock_console_print):
+    # Mock dimensions with profiles
+    dim1 = MockDimension("dim1", effective_default="profile1")
+    # Add get_profiles method to MockDimension for verbose mode
+    dim1.get_profiles = lambda: {"profile1": {}, "profile2": {}}
+    
+    # Mock active profiles
+    mock_get_active.side_effect = lambda d: "profile2" if d.name == "dim1" else None
+
+    # Call with verbose=True
+    display_status_tree([dim1], verbose=True)
+
+    mock_console_print.assert_called_once()
+    args, _ = mock_console_print.call_args
+    output_obj = args[0]
+
+    # Verify title has (verbose) indicator
+    assert "[bold cyan]Dimension Status[/bold cyan] [dim](verbose)[/dim]" in output_obj.label
+
+@patch('mux.ui.console_err.print')
+@patch('mux.ui.print_warning') 
 def test_display_status_tree_no_dimensions(mock_print_warning, mock_console_print):
     display_status_tree([])
     mock_print_warning.assert_called_once_with("No dimensions found to display status for.")
@@ -188,16 +209,21 @@ def test_display_show_table_success(mock_print_info, mock_console_print):
     # Verify table title
     # The title attribute might be the raw string with markup
     assert isinstance(output_obj.title, str)
-    assert f"Environment for [cyan]{dim_path}[/]" in output_obj.title
-    assert f"(Profile: [green]{active_profile}[/])" in output_obj.title
+    # Update assertion to match actual format
+    expected_title_part1 = f"Active Environment for [bold white]'{dim_path}'[/bold white] "
+    expected_title_part2 = f"([bold green]{active_profile}[/bold green])"
+    assert expected_title_part1 in output_obj.title
+    assert expected_title_part2 in output_obj.title
+    # assert f"Environment for [cyan]{dim_path}[/]" in output_obj.title # Old incorrect assertion
+    # assert f"(Profile: [green]{active_profile}[/])" in output_obj.title # Old incorrect assertion
     # from rich.text import Text
     # assert isinstance(output_obj.title, Text)
     # assert f"Environment for {dim_path}" in output_obj.title.plain
 
     # Verify Columns (check names)
     assert len(output_obj.columns) == 2
-    assert output_obj.columns[0].header == "Variable"
-    assert output_obj.columns[1].header == "Value"
+    assert output_obj.columns[0].header == "Variable Name"
+    assert output_obj.columns[1].header == "Current Value"
 
     # Verify Rows (check cell content - this is trickier as rows are added dynamically)
     # We know the mock data, let's check if the data seems present
