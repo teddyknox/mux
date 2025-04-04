@@ -1,0 +1,26 @@
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "mux-cli"
+version = "0.1.0"
+description = "Manage and switch environment profiles across dimensions"
+authors = ["Your Name <your@email.com>"]
+readme = "README.md"
+license = "MIT"
+packages = [
+    {include = "mux", from = "src"}
+]
+
+[tool.poetry.dependencies]
+python = ">=3.8"
+rich = "^13.0.0"
+pyyaml = "^6.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.3.1"
+pytest-cov = "^4.1.0"
+
+[tool.poetry.scripts]
+mux = "mux.cli:main"
