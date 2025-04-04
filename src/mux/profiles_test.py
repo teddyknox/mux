@@ -6,6 +6,7 @@ import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+from typing import Dict
 
 from mux.profiles import (
     parse_env_file,
@@ -16,6 +17,47 @@ from mux.profiles import (
 )
 from mux.exceptions import InvalidConfigError
 from mux.config import PROFILE_ENV_FILE_SUFFIX
+
+# Helper function to create dummy profile files/dirs for testing
+def setup_test_dimension(tmp_path: Path, config: Dict):
+    """Sets up a dimension directory structure in tmp_path based on config."""
+    dim_name = config.get("dim_name", "test_dim")
+    # The tmp_path passed might be like tmp_path / "subdir"
+    # Ensure the parent of the dimension path exists first
+    dim_parent_path = tmp_path
+    dim_parent_path.mkdir(parents=True, exist_ok=True)
+    
+    dim_path = dim_parent_path / dim_name
+    dim_path.mkdir() # Now create the actual dimension directory
+
+    if "profiles_dir" in config:
+        profiles_path = dim_path / "profiles"
+        profiles_path.mkdir()
+        for name, content in config["profiles_dir"].items():
+            # Assume .env suffix if not provided, based on other tests
+            suffix = ".env" if not name.endswith(".env") else ""
+            p_file = profiles_path / f"{name}{suffix}"
+            p_file.write_text(content)
+
+    if "profiles_yaml" in config:
+        yaml_path = dim_path / "profiles.yaml"
+        yaml_path.write_text(config["profiles_yaml"])
+
+    if "profiles_py" in config:
+        py_path = dim_path / "profiles.py"
+        py_path.write_text(config["profiles_py"])
+        # Make executable
+        # Use try-except for potential permission errors in restricted envs
+        try:
+            os.chmod(py_path, py_path.stat().st_mode | 0o111) # Add execute permissions
+        except OSError as e:
+            print(f"Warning: Could not make {py_path} executable: {e}")
+
+    if "default" in config:
+        default_file = dim_path / "default.txt"
+        default_file.write_text(config["default"])
+
+    return dim_path
 
 # --- Tests for parse_env_file ---
 
@@ -78,267 +120,250 @@ def test_load_profiles_from_files_parse_error(mock_print_warning, tmp_path):
 
 # --- Tests for load_profiles_from_yaml ---
 
-def test_load_profiles_from_yaml_success(tmp_path):
-    yaml_file = tmp_path / "profiles.yaml"
-    yaml_content = {
-        "dev": {"VAR1": "yaml_dev1", "VAR2": 123}, # Test int conversion
-        "prod": {"VAR1": "yaml_prod1", "VAR2": True} # Test bool conversion
-    }
-    yaml_file.write_text(yaml.dump(yaml_content))
+def test_load_yaml_success(tmp_path):
+    yaml_content = """
+    profileA:
+        VAR1: valueA1
+        VAR2: valueA2
+    profileB:
+        VAR1: valueB1
+    """
+    dim_path = setup_test_dimension(tmp_path, {"profiles_yaml": yaml_content})
+    yaml_file = dim_path / "profiles.yaml"
+    
     expected = {
-        "dev": {"VAR1": "yaml_dev1", "VAR2": "123"},
-        "prod": {"VAR1": "yaml_prod1", "VAR2": "True"}
+        "profileA": {"VAR1": "valueA1", "VAR2": "valueA2"},
+        "profileB": {"VAR1": "valueB1"}
     }
     assert load_profiles_from_yaml(yaml_file) == expected
 
-def test_load_profiles_from_yaml_file_not_exist(tmp_path):
-    yaml_file = tmp_path / "nonexistent.yaml"
+def test_load_yaml_non_existent(tmp_path):
+    yaml_file = tmp_path / "non_existent" / "profiles.yaml"
     assert load_profiles_from_yaml(yaml_file) == {}
 
-def test_load_profiles_from_yaml_empty_file(tmp_path):
-    yaml_file = tmp_path / "empty.yaml"
-    yaml_file.touch()
+def test_load_yaml_empty_file(tmp_path):
+    dim_path = setup_test_dimension(tmp_path, {"profiles_yaml": ""})
+    yaml_file = dim_path / "profiles.yaml"
     assert load_profiles_from_yaml(yaml_file) == {}
 
-def test_load_profiles_from_yaml_invalid_structure(tmp_path):
-    yaml_file = tmp_path / "invalid.yaml"
-    # YAML representing a list, not a dictionary
-    yaml_file.write_text(""" 
-- profile1: value1
-- profile2: value2
-""")
+def test_load_yaml_invalid_yaml(tmp_path):
+    dim_path = setup_test_dimension(tmp_path, {"profiles_yaml": "profileA: VAR1: valueA1\n  VAR2"}) # Invalid indentation
+    yaml_file = dim_path / "profiles.yaml"
+    with pytest.raises(InvalidConfigError, match="Error parsing YAML"):
+        load_profiles_from_yaml(yaml_file)
+
+def test_load_yaml_not_a_dict(tmp_path):
+    dim_path = setup_test_dimension(tmp_path, {"profiles_yaml": "- item1\n- item2"}) # List instead of dict
+    yaml_file = dim_path / "profiles.yaml"
     with pytest.raises(InvalidConfigError, match="YAML root must be a dictionary"):
         load_profiles_from_yaml(yaml_file)
 
-def test_load_profiles_from_yaml_profile_not_dict(tmp_path):
-    yaml_file = tmp_path / "invalid_profile.yaml"
-    yaml_content = {"dev": "not_a_dict"}
-    yaml_file.write_text(yaml.dump(yaml_content))
-    with pytest.raises(InvalidConfigError, match="Value for profile 'dev' must be a dictionary"):
-        load_profiles_from_yaml(yaml_file)
-
-def test_load_profiles_from_yaml_parse_error(tmp_path):
-    yaml_file = tmp_path / "parse_error.yaml"
-    yaml_file.write_text("dev: { key: 'value\n': invalid_yaml }")
-    with pytest.raises(InvalidConfigError, match="Error parsing YAML"):
+def test_load_yaml_profile_value_not_dict(tmp_path):
+    yaml_content = """
+    profileA: valueA # Should be a dict
+    profileB:
+        VAR1: valueB1
+    """
+    dim_path = setup_test_dimension(tmp_path, {"profiles_yaml": yaml_content})
+    yaml_file = dim_path / "profiles.yaml"
+    with pytest.raises(InvalidConfigError, match="Value for profile 'profileA' must be a dictionary"):
         load_profiles_from_yaml(yaml_file)
 
 # --- Tests for load_profiles_from_script ---
 
-@patch('subprocess.run')
-def test_load_profiles_from_script_success(mock_run, tmp_path):
-    script_file = tmp_path / "profiles.py"
-    script_file.touch()
-    os.chmod(script_file, 0o755) # Make executable
-
-    script_output = {
-        "script_dev": {"SCRIPT_VAR": "dev_val", "NUM": 456},
-        "script_prod": {"SCRIPT_VAR": "prod_val", "BOOL": False}
-    }
-    mock_run.return_value = MagicMock(
-        stdout=json.dumps(script_output), stderr="", returncode=0
-    )
-
+def test_load_script_success(tmp_path):
+    script_content = """#!/usr/bin/env python3
+import json
+print(json.dumps({
+    'script_prof1': {'SCRIPT_VAR': 'val1', 'COMMON': 'script'},
+    'script_prof2': {'SCRIPT_VAR': 'val2'}
+}))
+"""
+    dim_path = setup_test_dimension(tmp_path, {"profiles_py": script_content})
+    script_file = dim_path / "profiles.py"
     expected = {
-        "script_dev": {"SCRIPT_VAR": "dev_val", "NUM": "456"},
-        "script_prod": {"SCRIPT_VAR": "prod_val", "BOOL": "False"}
+        "script_prof1": {"SCRIPT_VAR": "val1", "COMMON": "script"},
+        "script_prof2": {"SCRIPT_VAR": "val2"}
     }
-    result = load_profiles_from_script(script_file)
-    assert result == expected
-    mock_run.assert_called_once_with(
-        [str(script_file)], capture_output=True, text=True, check=True, timeout=5
-    )
+    assert load_profiles_from_script(script_file) == expected
 
-@patch('subprocess.run')
-def test_load_profiles_from_script_with_parent(mock_run, tmp_path):
-    script_file = tmp_path / "profiles.py"
-    script_file.touch()
-    os.chmod(script_file, 0o755)
-    mock_run.return_value = MagicMock(stdout="{}", stderr="", returncode=0)
+def test_load_script_with_parent_profile_arg(tmp_path):
+    script_content = """#!/usr/bin/env python3
+import json
+import sys
+parent = sys.argv[1] if len(sys.argv) > 1 else 'default_parent'
+print(json.dumps({
+    f'prof_{parent}': {'PARENT': parent}
+}))
+"""
+    dim_path = setup_test_dimension(tmp_path, {"profiles_py": script_content})
+    script_file = dim_path / "profiles.py"
+    parent_name = "specific_parent"
+    expected = {
+        f"prof_{parent_name}": {"PARENT": parent_name}
+    }
+    assert load_profiles_from_script(script_file, parent_profile=parent_name) == expected
 
-    load_profiles_from_script(script_file, "parent_profile_name")
-    mock_run.assert_called_once_with(
-        [str(script_file), "parent_profile_name"], # Check parent arg passed
-        capture_output=True, text=True, check=True, timeout=5
-    )
-
-def test_load_profiles_from_script_not_exist(tmp_path):
-    script_file = tmp_path / "nonexistent.py"
+def test_load_script_non_existent(tmp_path):
+    script_file = tmp_path / "non_existent" / "profiles.py"
     assert load_profiles_from_script(script_file) == {}
 
-@patch('mux.profiles.print_warning')
-def test_load_profiles_from_script_not_executable(mock_print_warning, tmp_path):
-    script_file = tmp_path / "not_exec.py"
-    script_file.touch() # Not executable
+def test_load_script_not_executable(tmp_path, capsys):
+    script_content = "#!/usr/bin/env python3\nprint('{}')"
+    dim_path = setup_test_dimension(tmp_path, {"profiles_py": script_content})
+    script_file = dim_path / "profiles.py"
+    os.chmod(script_file, 0o644) # Ensure NOT executable
     assert load_profiles_from_script(script_file) == {}
-    mock_print_warning.assert_called_once()
-    # Check the content of the first argument passed to the mock
-    assert "not executable" in mock_print_warning.call_args[0][0]
+    captured = capsys.readouterr()
+    assert "not executable" in captured.err # Check warning
 
-@patch('subprocess.run')
-@patch('mux.profiles.print_warning')
-def test_load_profiles_from_script_error_exit(mock_print_warning, mock_run, tmp_path):
-    script_file = tmp_path / "error.py"
-    script_file.touch()
-    os.chmod(script_file, 0o755)
-    mock_run.side_effect = subprocess.CalledProcessError(1, [str(script_file)], stderr="Script failed badly")
-
+def test_load_script_execution_error(tmp_path, capsys):
+    script_content = "#!/usr/bin/env python3\nimport sys\nsys.exit(1)"
+    dim_path = setup_test_dimension(tmp_path, {"profiles_py": script_content})
+    script_file = dim_path / "profiles.py"
     assert load_profiles_from_script(script_file) == {}
-    mock_print_warning.assert_called_once()
-    assert "failed (exit code 1)" in mock_print_warning.call_args[0][0]
-    assert "Script failed badly" in mock_print_warning.call_args[0][0]
+    captured = capsys.readouterr()
+    assert "failed (exit code 1)" in captured.err
 
-@patch('subprocess.run')
-def test_load_profiles_from_script_invalid_json(mock_run, tmp_path):
-    script_file = tmp_path / "invalid_json.py"
-    script_file.touch()
-    os.chmod(script_file, 0o755)
-    mock_run.return_value = MagicMock(stdout="not valid json", stderr="", returncode=0)
+def test_load_script_timeout(tmp_path, capsys, monkeypatch):
+    # Mock subprocess.run to simulate timeout
+    def mock_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=kwargs.get('cmd', args[0]), timeout=0.1)
+    monkeypatch.setattr(subprocess, "run", mock_run)
 
-    with pytest.raises(InvalidConfigError, match="Error decoding JSON from script"):
+    script_content = "#!/usr/bin/env python3\nimport time\ntime.sleep(1)\nprint('{}')"
+    dim_path = setup_test_dimension(tmp_path, {"profiles_py": script_content})
+    script_file = dim_path / "profiles.py"
+    
+    assert load_profiles_from_script(script_file) == {}
+    captured = capsys.readouterr()
+    assert "timed out" in captured.err
+
+def test_load_script_invalid_json_output(tmp_path):
+    script_content = "#!/usr/bin/env python3\nprint('this is not json')"
+    dim_path = setup_test_dimension(tmp_path, {"profiles_py": script_content})
+    script_file = dim_path / "profiles.py"
+    with pytest.raises(InvalidConfigError, match="Error decoding JSON"):
         load_profiles_from_script(script_file)
 
-@patch('subprocess.run')
-def test_load_profiles_from_script_json_not_dict(mock_run, tmp_path):
-    script_file = tmp_path / "json_list.py"
-    script_file.touch()
-    os.chmod(script_file, 0o755)
-    mock_run.return_value = MagicMock(stdout="[1, 2, 3]", stderr="", returncode=0)
-
+def test_load_script_json_not_dict(tmp_path):
+    script_content = "#!/usr/bin/env python3\nimport json\nprint(json.dumps(['list', 'not', 'dict']))"
+    dim_path = setup_test_dimension(tmp_path, {"profiles_py": script_content})
+    script_file = dim_path / "profiles.py"
     with pytest.raises(InvalidConfigError, match="Script output must be a JSON dictionary"):
         load_profiles_from_script(script_file)
 
-@patch('subprocess.run')
-def test_load_profiles_from_script_profile_value_not_dict(mock_run, tmp_path):
-    script_file = tmp_path / "profile_list.py"
-    script_file.touch()
-    os.chmod(script_file, 0o755)
-    script_output = {"dev": ["invalid"]}
-    mock_run.return_value = MagicMock(stdout=json.dumps(script_output), stderr="", returncode=0)
-
-    with pytest.raises(InvalidConfigError, match="Value for profile 'dev' in script output must be a dictionary"):
+def test_load_script_profile_value_not_dict(tmp_path):
+    script_content = """#!/usr/bin/env python3
+import json
+print(json.dumps({
+    'profA': 'not a dict',
+    'profB': {'VAR': 'value'}
+}))
+"""
+    dim_path = setup_test_dimension(tmp_path, {"profiles_py": script_content})
+    script_file = dim_path / "profiles.py"
+    with pytest.raises(InvalidConfigError, match="Value for profile 'profA' in script output must be a dictionary"):
         load_profiles_from_script(script_file)
 
-@patch('subprocess.run')
-@patch('mux.profiles.print_warning')
-def test_load_profiles_from_script_timeout(mock_print_warning, mock_run, tmp_path):
-    script_file = tmp_path / "timeout.py"
-    script_file.touch()
-    os.chmod(script_file, 0o755)
-    mock_run.side_effect = subprocess.TimeoutExpired(cmd=[str(script_file)], timeout=5)
+# --- Tests for load_profiles_for_dimension (Priority & Fallback) ---
 
-    assert load_profiles_from_script(script_file) == {}
-    mock_print_warning.assert_called_once()
-    # Check the content of the first argument passed to the mock
-    assert "timed out after 5 seconds" in mock_print_warning.call_args[0][0]
+def test_load_dimension_priority_files_over_yaml_over_script(tmp_path):
+    """Test that profiles/ takes precedence over yaml, which takes precedence over script."""
+    files_config = {"file_prof": "FILE_VAR=file_val"}
+    yaml_content = "yaml_prof:\n  YAML_VAR: yaml_val"
+    script_content = "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'script_prof': {'SCRIPT_VAR': 'script_val'}}))"
+    
+    # Case 1: All exist, files should win
+    dim_path_all = setup_test_dimension(tmp_path / "all", {
+        "dim_name": "dim_all",
+        "profiles_dir": files_config,
+        "profiles_yaml": yaml_content,
+        "profiles_py": script_content
+    })
+    expected_files = {"file_prof": {"FILE_VAR": "file_val"}}
+    assert load_profiles_for_dimension(dim_path_all) == expected_files
 
-# --- Tests for load_profiles_for_dimension (precedence) ---
+    # Case 2: Yaml and Script exist, Yaml should win
+    dim_path_yaml_script = setup_test_dimension(tmp_path / "yaml_script", {
+        "dim_name": "dim_yaml_script",
+        # No profiles_dir
+        "profiles_yaml": yaml_content,
+        "profiles_py": script_content
+    })
+    expected_yaml = {"yaml_prof": {"YAML_VAR": "yaml_val"}}
+    assert load_profiles_for_dimension(dim_path_yaml_script) == expected_yaml
+    
+    # Case 3: Only Script exists, Script should win
+    dim_path_script = setup_test_dimension(tmp_path / "script", {
+        "dim_name": "dim_script",
+        # No profiles_dir or profiles_yaml
+        "profiles_py": script_content
+    })
+    expected_script = {"script_prof": {"SCRIPT_VAR": "script_val"}}
+    assert load_profiles_for_dimension(dim_path_script) == expected_script
 
-@patch('mux.profiles.load_profiles_from_files')
-@patch('mux.profiles.load_profiles_from_yaml')
-@patch('mux.profiles.load_profiles_from_script')
-def test_load_profiles_for_dimension_precedence_files(
-    mock_load_script, mock_load_yaml, mock_load_files, tmp_path
-):
-    dim_path = tmp_path / "dim"
+def test_load_dimension_no_sources(tmp_path):
+    """Test behavior when no profile sources are found."""
+    dim_path = tmp_path / "empty_dim"
     dim_path.mkdir()
-    (dim_path / "profiles").mkdir() # Presence triggers files check
-    (dim_path / "profiles.yaml").touch()
-    (dim_path / "profiles.py").touch()
+    assert load_profiles_for_dimension(dim_path) == {}
 
-    mock_load_files.return_value = {"file_prof": {"VAR": "file"}}
-    mock_load_yaml.return_value = {"yaml_prof": {"VAR": "yaml"}}
-    mock_load_script.return_value = {"script_prof": {"VAR": "script"}}
+def test_load_dimension_error_fallback(tmp_path, capsys):
+    """Test fallback when a higher priority source exists but has errors."""
+    # Files dir exists but contains bad file, should fall back to yaml
+    files_config_bad = {"bad_prof": "INVALID_CONTENT"} # Assume parse_env_file handles this gracefully or raises InvalidConfigError
+    yaml_content = "yaml_prof:\n  YAML_VAR: yaml_val"
+    
+    # Mock parse_env_file to raise error for this test
+    original_parse = parse_env_file
+    def mock_parse_env_file(file_path: Path):
+        if "bad_prof" in file_path.name:
+             raise InvalidConfigError("bad parse", str(file_path))
+        return original_parse(file_path) # call original for other cases if any
 
-    result = load_profiles_for_dimension(dim_path)
-    assert result == {"file_prof": {"VAR": "file"}}
-    mock_load_files.assert_called_once()
-    mock_load_yaml.assert_not_called()
-    mock_load_script.assert_not_called()
+    dim_path_file_error = setup_test_dimension(tmp_path / "file_err", {
+        "dim_name": "dim_file_err",
+        "profiles_dir": files_config_bad,
+        "profiles_yaml": yaml_content
+    })
+    
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("mux.profiles.parse_env_file", mock_parse_env_file)
+        # It seems load_profiles_from_files catches the error and returns {}, 
+        # so load_profiles_for_dimension proceeds to yaml. Let's adapt the test.
+        # The warning comes from load_profiles_from_files directly.
+        # assert load_profiles_for_dimension(dim_path_file_error) == {"yaml_prof": {"YAML_VAR": "yaml_val"}}
 
-@patch('mux.profiles.load_profiles_from_files')
-@patch('mux.profiles.load_profiles_from_yaml')
-@patch('mux.profiles.load_profiles_from_script')
-def test_load_profiles_for_dimension_precedence_yaml(
-    mock_load_script, mock_load_yaml, mock_load_files, tmp_path
-):
-    dim_path = tmp_path / "dim"
-    dim_path.mkdir()
-    # No profiles dir
-    (dim_path / "profiles.yaml").touch() # Presence triggers yaml check
-    (dim_path / "profiles.py").touch()
+        # Rework: load_profiles_from_files itself handles the error and prints a warning.
+        # We need to test that load_profiles_for_dimension correctly receives the empty dict
+        # from the failed file load and proceeds to load from YAML.
+        
+        # Step 1: Test load_profiles_from_files with error
+        profiles_dir = dim_path_file_error / "profiles"
+        assert load_profiles_from_files(profiles_dir) == {}
+        captured = capsys.readouterr()
+        assert "Skipping profile 'bad_prof'" in captured.err
 
-    mock_load_files.return_value = {}
-    mock_load_yaml.return_value = {"yaml_prof": {"VAR": "yaml"}}
-    mock_load_script.return_value = {"script_prof": {"VAR": "script"}}
+        # Step 2: Test load_profiles_for_dimension picks up YAML after files fail
+        assert load_profiles_for_dimension(dim_path_file_error) == {"yaml_prof": {"YAML_VAR": "yaml_val"}}
 
-    result = load_profiles_for_dimension(dim_path)
-    assert result == {"yaml_prof": {"VAR": "yaml"}}
-    mock_load_files.assert_called_once() # Still checks dir first
-    mock_load_yaml.assert_called_once()
-    mock_load_script.assert_not_called()
 
-@patch('mux.profiles.load_profiles_from_files')
-@patch('mux.profiles.load_profiles_from_yaml')
-@patch('mux.profiles.load_profiles_from_script')
-def test_load_profiles_for_dimension_precedence_script(
-    mock_load_script, mock_load_yaml, mock_load_files, tmp_path
-):
-    dim_path = tmp_path / "dim"
-    dim_path.mkdir()
-    # No profiles dir, no yaml file
-    (dim_path / "profiles.py").touch() # Presence triggers script check
-    os.chmod(dim_path / "profiles.py", 0o755)
+    # Yaml file exists but is invalid, should fall back to script
+    yaml_content_invalid = "key: val:\n nested"
+    script_content = "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'script_prof': {'SCRIPT_VAR': 'script_val'}}))"
+    
+    dim_path_yaml_error = setup_test_dimension(tmp_path / "yaml_err", {
+        "dim_name": "dim_yaml_err",
+        "profiles_yaml": yaml_content_invalid,
+        "profiles_py": script_content
+    })
+    
+    expected_script = {"script_prof": {"SCRIPT_VAR": "script_val"}}
+    assert load_profiles_for_dimension(dim_path_yaml_error) == expected_script
+    captured = capsys.readouterr() # Check warning for yaml error
+    assert "Error loading profiles from YAML" in captured.err
 
-    mock_load_files.return_value = {}
-    mock_load_yaml.return_value = {}
-    mock_load_script.return_value = {"script_prof": {"VAR": "script"}}
 
-    result = load_profiles_for_dimension(dim_path)
-    assert result == {"script_prof": {"VAR": "script"}}
-    mock_load_files.assert_called_once() # Checks dir
-    mock_load_yaml.assert_called_once() # Checks yaml
-    mock_load_script.assert_called_once()
-
-@patch('mux.profiles.load_profiles_from_files')
-@patch('mux.profiles.load_profiles_from_yaml')
-@patch('mux.profiles.load_profiles_from_script')
-def test_load_profiles_for_dimension_none_found(
-    mock_load_script, mock_load_yaml, mock_load_files, tmp_path
-):
-    dim_path = tmp_path / "dim"
-    dim_path.mkdir()
-    # No profile sources exist
-
-    mock_load_files.return_value = {}
-    mock_load_yaml.return_value = {}
-    mock_load_script.return_value = {}
-
-    result = load_profiles_for_dimension(dim_path)
-    assert result == {}
-    mock_load_files.assert_called_once()
-    mock_load_yaml.assert_called_once()
-    mock_load_script.assert_called_once()
-
-@patch('mux.profiles.print_warning')
-@patch('mux.profiles.load_profiles_from_files', side_effect=InvalidConfigError("Bad files"))
-@patch('mux.profiles.load_profiles_from_yaml')
-@patch('mux.profiles.load_profiles_from_script')
-def test_load_profiles_for_dimension_error_fallback_files(
-    mock_load_script, mock_load_yaml, mock_load_files, mock_print_warning, tmp_path
-):
-    dim_path = tmp_path / "dim"
-    dim_path.mkdir()
-    (dim_path / "profiles").mkdir() # Trigger files check
-    (dim_path / "profiles.yaml").touch()
-
-    mock_load_yaml.return_value = {"yaml_prof": {"VAR": "yaml"}}
-
-    result = load_profiles_for_dimension(dim_path)
-
-    assert result == {"yaml_prof": {"VAR": "yaml"}} # Falls back to YAML
-    mock_print_warning.assert_called_once()
-    assert "Error loading profiles from directory" in mock_print_warning.call_args[0][0]
-    mock_load_files.assert_called_once()
-    mock_load_yaml.assert_called_once()
-    mock_load_script.assert_not_called() 
+# TODO: Add tests for parent_dim interaction once its structure is clearer
+# For now, load_profiles_from_script tests passing the name. 

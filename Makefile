@@ -2,23 +2,23 @@
 
 help:
 	@echo "Available commands:"
-	@echo "  install   - Install the package in editable mode"
-	@echo "  test      - Run tests using pytest"
+	@echo "  install   - Install project dependencies using Poetry"
+	@echo "  test      - Run tests using pytest within the Poetry environment"
 	@echo "  lint      - Run linters (e.g., flake8, black, mypy - requires setup)"
 	@echo "  clean     - Remove build artifacts and cache files"
 
 install:
-	pip install -e .
+	poetry install
 
 test:
-	pytest src/
+	poetry run pytest src/
 
 lint:
-	@echo "Linting..."
+	@echo "Linting... (Remember to use 'poetry run ...')"
 	# Add linting commands here, e.g.:
-	# flake8 src/mux tests
-	# black --check src/mux tests
-	# mypy src/mux
+	# poetry run flake8 src/mux tests
+	# poetry run black --check src/mux tests
+	# poetry run mypy src/mux
 
 clean:
 	@echo "Cleaning up..."

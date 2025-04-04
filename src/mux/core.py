@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Dict
 
 # Import necessary modules from the package
-from .config import DIMS_DIR, DEFAULTS_DIR, DEFAULT_FILENAME
+from .config import DIMS_DIR, DEFAULTS_DIR, DEFAULT_FILENAME, MUX_DEFAULT_PROFILES_DIR, MUX_DIR
 from .profiles import load_profiles_for_dimension # Example import
 from .shell import get_active_profile_from_env, generate_shell_commands, run_fzf # Added run_fzf
 from .ui import display_status_tree, display_show_table, print_warning, print_success, print_info, print_error # Added print_error
@@ -18,6 +18,24 @@ def _get_user_default_file_path(dim_path_str: str) -> Path:
     """Converts 'path/to/dim' into ~/.multiplex/defaults/path_to_dim."""
     # Replace slashes and potentially other unsafe chars with underscore
     safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', dim_path_str)
+    return DEFAULTS_DIR / safe_filename
+
+def dimension_path_to_defaults_path(dimension_path: Path) -> Path:
+    """Converts 'path/to/dim' into ~/.mux/defaults/path_to_dim.
+    Uses the path relative to DIMS_DIR for the filename part.
+    """
+    # Calculate path relative to the main DIMS_DIR
+    try:
+        relative_path = dimension_path.relative_to(DIMS_DIR)
+    except ValueError:
+        # Handle cases where the path might not be under DIMS_DIR (though unlikely in normal use)
+        # Fallback to using the full path name parts, joined by underscore
+        relative_path = Path("_".join(dimension_path.parts))
+        # Optional: Add a warning here if this case is unexpected
+        # print_warning(f"Dimension path {dimension_path} not relative to {DIMS_DIR}. Using fallback filename.")
+
+    # Replace slashes and potentially other unsafe chars with underscore in the relative path
+    safe_filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', relative_path.as_posix())
     return DEFAULTS_DIR / safe_filename
 
 class Dimension:
@@ -68,9 +86,11 @@ class Dimension:
         return self._read_default_file(self.path / DEFAULT_FILENAME)
 
     def get_user_default_profile(self) -> Optional[str]:
-        """Reads the user-set default profile name from ~/.multiplex/defaults/."""
-        default_file = _get_user_default_file_path(self.get_dim_path_str())
-        return self._read_default_file(default_file)
+        """Reads the user-set default profile name from ~/.mux/defaults/."""
+        defaults_file_path = dimension_path_to_defaults_path(self.path)
+        if not defaults_file_path.exists():
+            return None
+        return self._read_default_file(defaults_file_path)
 
     def get_effective_default_profile(self) -> Optional[str]:
         """Returns the user default if set, otherwise the source default."""
@@ -80,23 +100,23 @@ class Dimension:
         return self.get_source_default_profile()
         
     def set_user_default_profile(self, profile_name: str):
-        """Sets the user default profile by writing to ~/.multiplex/defaults/."""
+        """Sets the user default profile by writing to ~/.mux/defaults/."""
         if profile_name not in self.get_profiles():
             # This check should ideally happen before calling this method
             # but adding defensively.
             from .exceptions import ProfileNotFoundError
             raise ProfileNotFoundError(profile_name, self.get_dim_path_str())
             
-        default_file = _get_user_default_file_path(self.get_dim_path_str())
+        defaults_file_path = dimension_path_to_defaults_path(self.path)
         try:
             # Ensure the defaults directory exists
-            DEFAULTS_DIR.mkdir(parents=True, exist_ok=True)
-            default_file.write_text(f"{profile_name}\n")
+            defaults_file_path.parent.mkdir(parents=True, exist_ok=True)
+            defaults_file_path.write_text(f"{profile_name}\n")
             print_success(f"Set default profile for dimension '{self.get_dim_path_str()}' to '{profile_name}'.")
         except Exception as e:
              # Use a more specific exception if possible
             from .exceptions import MuxError
-            raise MuxError(f"Failed to write user default file '{default_file}': {e}")
+            raise MuxError(f"Failed to write user default file '{defaults_file_path}': {e}")
             
     def get_profile_env(self, profile_name: str) -> Dict[str, str]:
         """Gets the environment for a specific profile name within this dimension.
@@ -132,21 +152,38 @@ class Mux:
         # Initialize console/UI elements if managed here
 
     def _discover_dimensions(self, current_dir: Path, parent: Optional[Dimension]):
-        """Recursively discovers dimensions starting from current_dir."""
+        """Recursively discovers dimensions starting from current_dir.
+        Root dimensions are any directory under DIMS_DIR.
+        Sub-dimensions must be located within a 'dims/' subdirectory of their parent.
+        """
         if not current_dir.is_dir():
             return
 
-        for item in sorted(current_dir.iterdir()):
-            if item.is_dir():
-                # Found a dimension directory
-                dim = Dimension(item.name, item, parent)
-                if parent:
-                    parent.children.append(dim)
-                else:
+        # Determine if we are discovering root dimensions or sub-dimensions
+        is_root_discovery = (parent is None and current_dir == DIMS_DIR)
+
+        if is_root_discovery:
+            # Discover root dimensions: any directory directly under DIMS_DIR
+            for item in sorted(current_dir.iterdir()):
+                if item.is_dir():
+                    dim = Dimension(item.name, item, None) # Parent is None
                     self.root_dimensions.append(dim)
-                
-                # Recursively search within the new dimension's directory
-                self._discover_dimensions(item, dim)
+                    # Now discover sub-dimensions WITHIN this new root dimension's directory
+                    self._discover_dimensions(item, dim) # Pass the new dim as parent
+        else:
+            # Discover sub-dimensions: look ONLY inside a 'dims' directory
+            sub_dims_container = current_dir / "dims"
+            if sub_dims_container.is_dir():
+                 for item in sorted(sub_dims_container.iterdir()):
+                    if item.is_dir():
+                        # This item is an actual sub-dimension
+                        # The parent is the dimension whose directory we are currently in ('current_dir')
+                        dim = Dimension(item.name, item, parent) 
+                        if parent: # Parent should be the dimension owning the 'dims' dir
+                            parent.children.append(dim)
+                        # Recursively search within the sub-dimension's directory
+                        # looking for ITS 'dims/' dir. Pass the newly created sub-dim as parent.
+                        self._discover_dimensions(item, dim)
 
     def _get_all_dimensions_flat(self) -> Dict[str, Dimension]:
         """Returns a flat dictionary mapping dim_path_str to Dimension object."""
@@ -307,6 +344,44 @@ class Mux:
         
         # Set the default profile
         dim.set_configured_default_profile(profile_name)
+
+    def handle_auto_activate(self):
+        """Generates shell commands to activate default profiles for inactive dimensions."""
+        all_commands = []
+        for dim_path_str, dim in sorted(self.all_dimensions.items()):
+            # Check if the dimension is already active
+            if get_active_profile_from_env(dim) is None:
+                # Dimension is inactive, check for a default
+                default_profile = dim.get_effective_default_profile()
+                if default_profile:
+                    try:
+                        # Ensure the default profile actually exists before activating
+                        if default_profile in dim.get_profiles():
+                            new_env = dim.get_profile_env(default_profile)
+                            # Generate commands to activate this default
+                            # Pass old_env=None as we are activating from an inactive state
+                            commands = generate_shell_commands(
+                                target_dim_path_str=dim_path_str,
+                                old_env=None, 
+                                new_env=new_env, 
+                                new_profile_name=default_profile
+                            )
+                            if commands.strip(): # Avoid adding empty strings
+                                all_commands.append(commands.strip())
+                        else:
+                            # Default profile listed but doesn't exist, print warning
+                            print_warning(f"Default profile '{default_profile}' for dimension '{dim_path_str}' not found. Skipping auto-activation.")
+                    except ProfileNotFoundError:
+                         # Should be caught by the 'in dim.get_profiles()' check, but handle defensively
+                         print_warning(f"Default profile '{default_profile}' for dimension '{dim_path_str}' caused an error. Skipping auto-activation.")
+                    except Exception as e:
+                         print_warning(f"Error auto-activating default profile for '{dim_path_str}': {e}")
+        
+        # Print all activation commands to stdout for shell evaluation
+        if all_commands:
+            sys.stdout.write("\n".join(all_commands) + "\n")
+        # If no commands, print nothing (or maybe ":" no-op? Let's stick with nothing for now)
+            
 
     # ... potentially other helper methods ...
 

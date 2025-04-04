@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 
+import os
 from pathlib import Path
 
 # Core configuration paths and constants for Mux.
 
-# Root configuration directory (~/.multiplex)
-CONFIG_DIR = Path.home() / ".multiplex"
+# Root configuration directory (~/.mux)
+MUX_DIR = Path(os.environ.get("MUX_DIR", Path.home() / ".mux"))
 
-# Directory containing dimension definitions
-DIMS_DIR = CONFIG_DIR / "dims"
+# Directory where dimension configurations are stored (~/.mux/dims)
+DIMS_DIR = MUX_DIR / "dims"
 
-# Directory storing user-set default profiles
-DEFAULTS_DIR = CONFIG_DIR / "defaults"
+# Directory for storing user default profile selections (~/.mux/defaults)
+MUX_DEFAULT_PROFILES_DIR = MUX_DIR / "defaults"
 
 # Filename used for source-defined default within a dimension directory
 DEFAULT_FILENAME = "default.txt"
@@ -25,4 +26,7 @@ PROFILE_ENV_FILE_SUFFIX = ".env"
 # Ensure base directories exist (optional, can be done on demand)
 # DIMS_DIR.mkdir(parents=True, exist_ok=True)
 # DEFAULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Deprecated: Directory for storing user default profile selections (~/.mux/defaults)
+DEFAULTS_DIR = MUX_DIR / "defaults"
 

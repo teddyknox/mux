@@ -2,25 +2,32 @@
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
-[tool.poetry]
-name = "mux-cli"
+[project]
+name = "mux"
 version = "0.1.0"
-description = "Manage and switch environment profiles across dimensions"
-authors = ["Your Name <your@email.com>"]
+authors = [
+  { name="Your Name", email="your@email.com" },
+]
+description = "A dimension-based environment variable manager"
 readme = "README.md"
-license = "MIT"
-packages = [
-    {include = "mux", from = "src"}
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Utilities",
+    "Environment :: Console",
 ]
 
-[tool.poetry.dependencies]
-python = ">=3.8"
-rich = "^13.0.0"
-pyyaml = "^6.0"
+[project.urls]
+"Homepage" = "https://github.com/yourusername/mux"
+"Bug Tracker" = "https://github.com/yourusername/mux/issues"
 
-[tool.poetry.group.dev.dependencies]
-pytest = "^7.3.1"
-pytest-cov = "^4.1.0"
-
-[tool.poetry.scripts]
+[project.scripts]
 mux = "mux.cli:main"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+rich = "^13.7.1"
+pytest = "^8.1.1"
+pyyaml = "^6.0.1"

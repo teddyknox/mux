@@ -22,21 +22,25 @@ pip install -e .
 
 ## Setup (Shell Integration)
 
-To enable automatic environment switching, you need to add a line to your shell's configuration file (e.g., `~/.zshrc`, `~/.bashrc`).
+After installation, the `mux` command will be available in your path.
 
-Run `mux init <your_shell_name>` (e.g., `mux init zsh`) and add the output to your shell configuration file:
+Commands that modify your shell environment (`switch`, `auto`) work by **outputting shell commands (like `export` and `unset`) to standard output**. To apply these changes, you must evaluate the output of these `mux` commands in your shell using `eval "$(...)"`.
+
+**Automatic Activation (Optional):**
+
+To automatically activate the default profile for any inactive dimensions when your shell starts, add the following line to your shell's configuration file (e.g., `~/.zshrc`, `~/.bashrc`):
 
 ```bash
-# Example for .zshrc or .bashrc
-eval "$(mux init zsh)" # Or 'bash'
+# Activate mux default profiles on shell startup
+eval "$(mux auto)"
 ```
 
-Restart your shell or source the configuration file (`source ~/.zshrc`) for the changes to take effect. This defines a `mux` shell function that handles environment updates.
+Restart your shell or source the configuration file (e.g., `source ~/.zshrc`) for the changes to take effect.
 
 ## Configuration
 
-1.  Create the configuration directory: `mkdir -p ~/.multiplex/dims`
-2.  Define dimensions as subdirectories under `~/.multiplex/dims/`.
+1.  Create the configuration directory: `mkdir -p ~/.mux/dims`
+2.  Define dimensions as subdirectories under `~/.mux/dims/`.
 3.  Define profiles within each dimension using one of the methods:
     * **Files**: Create a `profiles/` subdirectory (`<dim>/profiles/`). Each `.env` file within is a profile (e.g., `<dim>/profiles/my-profile.env`).
     * **YAML**: Create a `<dim>/profiles.yaml` file with a `profiles:` key containing profile definitions.
@@ -48,30 +52,29 @@ Restart your shell or source the configuration file (`source ~/.zshrc`) for the 
 
 ## Usage
 
-After setting up shell integration, you can use `mux` commands directly:
-
 ```bash
-# Show current status (outputs to stderr)
+# Show current status (outputs info to stderr)
 mux status
 
-# Show environment variables for an active dimension (outputs to stderr)
+# Show environment variables for an active dimension (outputs info to stderr)
 mux show <dimension_path>
 
-# Switch profile (environment updates automatically)
-mux switch <dimension_path> <profile_name>
+# Switch profile (outputs shell commands to stdout for eval)
+eval "$(mux switch <dimension_path> <profile_name>)"
 
-# Switch profile using fzf selector (environment updates automatically)
-mux switch <dimension_path>
-mux switch # Select dimension first, then profile
+# Switch profile using fzf selector (outputs shell commands to stdout for eval)
+eval "$(mux switch <dimension_path>)"
+eval "$(mux switch)" # Select dimension first, then profile
 
-# Set the user-preferred default for a dimension (outputs to stderr)
+# Set the user-preferred default for a dimension (outputs info to stderr)
 mux default <dimension_path> <profile_name>
 
-# Show help (outputs to stderr)
-mux help
+# Automatically activate defaults for inactive dimensions (outputs shell commands to stdout for eval)
+eval "$(mux auto)"
 
-# Print the shell initialization script again (outputs to stdout)
-mux init <shell_name>
+# Show help (argparse built-in)
+mux --help
+mux <command> --help
 ```
 
 ## Contributing
