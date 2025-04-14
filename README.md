@@ -1,5 +1,9 @@
 # Mux CLI
 
+<p align="center">
+  <img src="logo.png" alt="Mux CLI Logo" width="200">
+</p>
+
 Manage and switch environment profiles across dimensions.
 
 ## Description

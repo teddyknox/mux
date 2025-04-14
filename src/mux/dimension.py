@@ -132,24 +132,6 @@ class Dimension:
         # Use the imported state function with the dimension name string
         return get_active_profile(self.name)
 
-    def get_user_default_profile(self) -> Optional[str]:
-        """Reads the user default profile from ~/.mux/defaults/."""
-        self._load_config() # Ensure profiles are loaded to validate default
-        defaults_file_path = dimension_path_to_defaults_path(self.path)
-        if defaults_file_path.exists() and defaults_file_path.is_file():
-            try:
-                user_default = defaults_file_path.read_text().strip()
-                if user_default:
-                    # Validate that the profile actually exists
-                    if user_default in self._profiles:
-                        return user_default
-                    else:
-                        print_warning(f"User default profile '{user_default}' for dimension '{self.get_dim_path_str()}' not found. Ignoring.")
-                        return None
-            except Exception as e:
-                print_warning(f"Error reading user default file '{defaults_file_path}': {e}")
-        return None
-
     def get_effective_default_profile(self) -> Optional[str]:
         """Returns the source default if valid."""
         # Ensure profiles are loaded silently since we're just checking defaults
