@@ -60,63 +60,82 @@ Mux makes it easy to configure and switch between different environment settings
 
 ## Configuration Overview
 
-*   **Profiles:** Defined inside dimension directories (`~/.mux/dims/<dimension>/`).
-    *(Mux uses the first method it finds in the order: script > YAML > .env files)*
+## Profiles
 
-    ### Method: Individual `.env` Files
+Profiles are defined inside dimension directories (`~/.mux/dims/<dimension>/`). Mux uses the first method it finds in the order: script > YAML > .env files.
 
-    Create `.env` files in a `profiles/` subdirectory (e.g., `profiles/dev.env`).
-    Example `~/.mux/dims/kubernetes/profiles/dev.env`:
-    ```dotenv
-    # Comments are allowed
-    KUBECONFIG=~/.kube/config-dev
-    K8S_NAMESPACE=development
-    K8S_CONTEXT=dev-cluster
-    ```
+### Method 1: Individual `.env` Files
 
-    ### Method: Single `profiles.yaml` File
+Simple `.env` files in a `profiles/` subdirectory (e.g., `profiles/dev.env`).
+Example directory structure:
 
-    Create a single `profiles.yaml` file listing multiple profiles.
-    Example `~/.mux/dims/aws/profiles.yaml`:
-    ```yaml
-    dev:
-      AWS_PROFILE: development
-      AWS_REGION: us-west-2
-      AWS_ACCOUNT_ID: "123456789012"
+```bash
+mux $ tree ~/.mux
+/Users/edward/.mux
+├── defaults
+│   └── eth_rpc
+└── dims
+    └── kubernetes
+        ├── default.txt
+        └── profiles
+            ├── a.env
+            ├── b.env
+            └── c.env
+```
 
-    prod:
-      AWS_PROFILE: production
-      AWS_REGION: us-east-1
-      AWS_ACCOUNT_ID: "987654321098"
-    ```
+Example .env file `~/.mux/dims/kubernetes/profiles/a.env`:
+```dotenv
+# Comments are allowed
+KUBECONFIG=~/.kube/config-dev
+K8S_NAMESPACE=development
+K8S_CONTEXT=dev-cluster
+```
 
-    ### Method: Executable `profiles.py` Script
+### Method 2: Single `profiles.yaml` File
 
-    Create an executable `profiles.py` script for dynamic generation (outputs JSON).
-    Example `~/.mux/dims/blockchain/profiles.py`:
-    ```python
-    #!/usr/bin/env python3
-    import json
-    import os
+A single `profiles.yaml` file listing multiple profiles.
+Example `~/.mux/dims/aws/profiles.yaml`:
+```yaml
+dev:
+  AWS_PROFILE: development
+  AWS_REGION: us-west-2
+  AWS_ACCOUNT_ID: "123456789012"
 
-    # Example: Generate profiles dynamically
-    networks = {
-        "mainnet": {
-            "RPC_URL": "https://mainnet.infura.io/v3/" + os.environ.get("INFURA_KEY", ""),
-            "CHAIN_ID": "1"
-        },
-        "sepolia": {
-            "RPC_URL": "https://sepolia.infura.io/v3/" + os.environ.get("INFURA_KEY", ""),
-            "CHAIN_ID": "11155111"
-        }
+prod:
+  AWS_PROFILE: production
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: "987654321098"
+```
+
+### Method 3: Executable `profiles.py` Script
+
+An executable `profiles.py` script for dynamic generation (outputs JSON).
+Example `~/.mux/dims/blockchain/profiles.py`:
+```python
+#!/usr/bin/env python3
+import json
+import os
+
+# Example: Generate profiles dynamically
+networks = {
+    "mainnet": {
+        "RPC_URL": "https://mainnet.infura.io/v3/" + os.environ.get("INFURA_KEY", ""),
+        "CHAIN_ID": "1"
+    },
+    "sepolia": {
+        "RPC_URL": "https://sepolia.infura.io/v3/" + os.environ.get("INFURA_KEY", ""),
+        "CHAIN_ID": "11155111"
     }
+}
 
-    # The script MUST output a JSON object to stdout
-    print(json.dumps(networks))
-    ```
-    *(Remember to make the script executable: `chmod +x ~/.mux/dims/blockchain/profiles.py`)*
+# The script MUST output a JSON object to stdout
+print(json.dumps(networks))
+```
+*(Remember to make the script executable: `chmod +x ~/.mux/dims/blockchain/profiles.py`)*
 
-*   **Default Profile:** Set a default profile for a dimension using `mux set-default <dimension> <profile>` or interactively with `mux set-default`. This creates a `default.txt` file.
+## Default Profiles
+
+Set a default profile for a dimension using `mux set-default <dimension> <profile>` or interactively with `mux set-default`. This creates a `default.txt` file.
 
 *For detailed configuration options and advanced usage, please refer to the project documentation or code comments.*
 
