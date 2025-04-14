@@ -182,6 +182,10 @@ def find_dimensions(base_path: Path = DIMS_DIR) -> Dict[str, Dimension]:
         if not dim_path.is_dir() or dim_path.name.startswith('.'):
             continue
 
+        # Skip "dims" directories - we'll handle them later when establishing parent-child relationships
+        if dim_path.name == "dims":
+            continue
+
         # Basic validation: check for profile sources or default file
         has_profiles_dir = (dim_path / "profiles").is_dir()
         has_profiles_yaml = (dim_path / "profiles.yaml").is_file()
@@ -194,14 +198,34 @@ def find_dimensions(base_path: Path = DIMS_DIR) -> Dict[str, Dimension]:
 
     # Establish parent-child relationships and build final dict by path string
     for dim_path, dim_obj in dims_by_path.items():
-        # A dimension's parent directory must also be a valid dimension path
-        parent_path = dim_path.parent.resolve()
-        if parent_path in dims_by_path and parent_path != DIMS_DIR.resolve():
-            parent_obj = dims_by_path[parent_path]
-            dim_obj.parent = parent_obj
-            parent_obj.children.append(dim_obj)
-
+        # Check if this dimension has a "dims" subdirectory with subdimensions
+        subdims_dir = dim_path / "dims"
+        if subdims_dir.exists() and subdims_dir.is_dir():
+            # Find all immediate subdirectories in the "dims" directory
+            for subdim_path in subdims_dir.iterdir():
+                if not subdim_path.is_dir() or subdim_path.name.startswith('.'):
+                    continue
+                
+                # Basic validation for subdimension
+                has_profiles_dir = (subdim_path / "profiles").is_dir()
+                has_profiles_yaml = (subdim_path / "profiles.yaml").is_file()
+                has_profiles_py = (subdim_path / "profiles.py").is_file()
+                has_default = (subdim_path / "default.txt").is_file()
+                if not (has_profiles_dir or has_profiles_yaml or has_profiles_py or has_default):
+                    continue # Skip directories that don't look like dimensions
+                
+                # Create subdimension and establish parent-child relationship
+                subdim_obj = Dimension(subdim_path.name, subdim_path, parent=dim_obj)
+                dim_obj.children.append(subdim_obj)
+                dims_by_path[subdim_path] = subdim_obj
+        
+        # Add to final dimensions dict by path string
         dimensions[dim_obj.get_dim_path_str()] = dim_obj
+    
+    # Add all subdimensions to the final dictionary
+    for dim_path, dim_obj in dims_by_path.items():
+        if dim_obj.parent is not None:  # This is a subdimension
+            dimensions[dim_obj.get_dim_path_str()] = dim_obj
 
     return dimensions
 

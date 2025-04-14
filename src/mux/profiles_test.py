@@ -248,7 +248,9 @@ print(json.dumps({
     script_file = dim_path / "profiles.py"
     assert load_profiles_from_script(script_file) is None # Expect None
     captured = capsys.readouterr()
-    assert "Value for profile \n'profA' must be a dictionary" in captured.err # Check warning with newline
+    # Check that the key parts of the error message are present, accounting for formatting
+    assert "Value for profile 'profA' must be a dictionary" in captured.err
+    assert "env vars" in captured.err
 
 # --- Tests for load_profiles_for_dimension (Priority & Fallback) ---
 

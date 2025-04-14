@@ -139,6 +139,127 @@ Set a default profile for a dimension using `mux set-default <dimension> <profil
 
 *For detailed configuration options and advanced usage, please refer to the project documentation or code comments.*
 
+## Hierarchical Dimensions
+
+Mux supports hierarchical dimensions, allowing you to organize related configuration aspects in parent-child relationships. This is useful for scenarios where one configuration depends on another.
+
+### How Hierarchical Dimensions Work
+
+- Dimensions can have subdimensions, stored in a `dims/` directory within the parent dimension
+- When you switch a parent dimension, all its child dimensions are automatically deactivated
+- Child dimensions can access their parent's active profile (when using dynamic scripts)
+- Subdimensions are referenced using path notation (e.g., `kubernetes/namespace`)
+
+### Example: Kubernetes Contexts and Namespaces
+
+A common use case is managing Kubernetes contexts (clusters) as the parent dimension and namespaces as the child dimension:
+
+```bash
+mux $ tree ~/.mux/dims/kubernetes
+/Users/edward/.mux/dims/kubernetes
+├── default.txt                    # Contains default context: "dev"
+├── profiles.yaml                  # Defines context profiles
+└── dims/                          # Subdimensions directory
+    └── namespace/                 # Namespace subdimension
+        ├── default.txt            # Default namespace: "default"
+        └── profiles.yaml          # Namespace profiles
+```
+
+**Parent dimension (kubernetes contexts):**
+
+`~/.mux/dims/kubernetes/profiles.yaml`:
+```yaml
+dev:
+  KUBECONFIG: ~/.kube/config
+  KUBE_CONTEXT: dev-cluster
+  
+staging:
+  KUBECONFIG: ~/.kube/config
+  KUBE_CONTEXT: staging-cluster
+  
+prod:
+  KUBECONFIG: ~/.kube/config
+  KUBE_CONTEXT: production-cluster
+```
+
+**Child dimension (kubernetes namespaces):**
+
+`~/.mux/dims/kubernetes/dims/namespace/profiles.yaml`:
+```yaml
+default:
+  KUBE_NAMESPACE: default
+  
+app:
+  KUBE_NAMESPACE: my-application
+  
+monitoring:
+  KUBE_NAMESPACE: monitoring
+```
+
+**Using dynamic scripts with parent context:**
+
+For more advanced use cases, you can create a script that dynamically generates profiles based on the parent dimension's active profile:
+
+`~/.mux/dims/kubernetes/dims/namespace/profiles.py`:
+```python
+#!/usr/bin/env python3
+import json
+import sys
+
+# Get parent profile (context) if available
+parent_profile = sys.argv[1] if len(sys.argv) > 1 else None
+
+# Base namespaces available in all contexts
+namespaces = {
+    "default": {"KUBE_NAMESPACE": "default"},
+    "kube-system": {"KUBE_NAMESPACE": "kube-system"}
+}
+
+# Add context-specific namespaces
+if parent_profile == "dev":
+    namespaces["dev-app"] = {"KUBE_NAMESPACE": "dev-application"}
+elif parent_profile == "staging":
+    namespaces["staging-app"] = {"KUBE_NAMESPACE": "staging-application"}
+elif parent_profile == "prod":
+    namespaces["prod-app"] = {"KUBE_NAMESPACE": "production-application"}
+    namespaces["monitoring"] = {"KUBE_NAMESPACE": "monitoring"}
+
+print(json.dumps(namespaces))
+```
+
+### Using Hierarchical Dimensions
+
+**Switching parent dimensions:**
+```bash
+# Switch kubernetes context to dev
+mux switch kubernetes dev
+
+# This automatically deactivates any active kubernetes/namespace
+```
+
+**Switching child dimensions:**
+```bash
+# After setting kubernetes context, set the namespace
+mux switch kubernetes/namespace app
+```
+
+**Using .muxrc with hierarchical dimensions:**
+
+Add both parent and child dimensions to your `.muxrc`:
+```
+# project/.muxrc
+kubernetes=dev
+kubernetes/namespace=app
+```
+
+This will activate both the `dev` kubernetes context and the `app` namespace when you enter the project directory.
+
+**Viewing status:**
+```bash
+mux status
+```
+Shows the hierarchical structure with active profiles for each dimension level.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

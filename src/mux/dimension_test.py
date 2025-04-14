@@ -311,5 +311,6 @@ def test_set_nonexistent_default_profile(setup_manual_dimension, capsys):
     assert not success
     assert dim.get_default_profile_name() == original_default # Should not change
     # Check that the warning message is printed
-    expected_warning = "Warning: Profile 'nonexistent' does not exist for dimension 'kube'"
-    assert expected_warning in captured.err 
+    # The warning message includes ANSI color codes, so we just check for the core text
+    assert "Profile 'nonexistent' does not exist for dimension 'kube'" in captured.err
+    assert "Available profiles" in captured.err 
