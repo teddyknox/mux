@@ -62,51 +62,60 @@ Mux makes it easy to configure and switch between different environment settings
 
 *   **Profiles:** Defined inside dimension directories (`~/.mux/dims/<dimension>/`).
     *(Mux uses the first method it finds in the order: script > YAML > .env files)*
-    Mux supports:
-    *   Simple `.env` files in a `profiles/` subdirectory (e.g., `profiles/dev.env`).
-        Example `~/.mux/dims/kubernetes/profiles/dev.env`:
-        ```dotenv
-        # Comments are allowed
-        KUBECONFIG=~/.kube/config-dev
-        K8S_NAMESPACE=development
-        K8S_CONTEXT=dev-cluster
-        ```
-    *   A single `profiles.yaml` file listing multiple profiles.
-        Example `~/.mux/dims/aws/profiles.yaml`:
-        ```yaml
-        dev:
-          AWS_PROFILE: development
-          AWS_REGION: us-west-2
-          AWS_ACCOUNT_ID: "123456789012"
 
-        prod:
-          AWS_PROFILE: production
-          AWS_REGION: us-east-1
-          AWS_ACCOUNT_ID: "987654321098"
-        ```
-    *   An executable `profiles.py` script for dynamic generation (outputs JSON).
-        Example `~/.mux/dims/blockchain/profiles.py`:
-        ```python
-        #!/usr/bin/env python3
-        import json
-        import os
+    ### Method: Individual `.env` Files
 
-        # Example: Generate profiles dynamically
-        networks = {
-            "mainnet": {
-                "RPC_URL": "https://mainnet.infura.io/v3/" + os.environ.get("INFURA_KEY", ""),
-                "CHAIN_ID": "1"
-            },
-            "sepolia": {
-                "RPC_URL": "https://sepolia.infura.io/v3/" + os.environ.get("INFURA_KEY", ""),
-                "CHAIN_ID": "11155111"
-            }
+    Create `.env` files in a `profiles/` subdirectory (e.g., `profiles/dev.env`).
+    Example `~/.mux/dims/kubernetes/profiles/dev.env`:
+    ```dotenv
+    # Comments are allowed
+    KUBECONFIG=~/.kube/config-dev
+    K8S_NAMESPACE=development
+    K8S_CONTEXT=dev-cluster
+    ```
+
+    ### Method: Single `profiles.yaml` File
+
+    Create a single `profiles.yaml` file listing multiple profiles.
+    Example `~/.mux/dims/aws/profiles.yaml`:
+    ```yaml
+    dev:
+      AWS_PROFILE: development
+      AWS_REGION: us-west-2
+      AWS_ACCOUNT_ID: "123456789012"
+
+    prod:
+      AWS_PROFILE: production
+      AWS_REGION: us-east-1
+      AWS_ACCOUNT_ID: "987654321098"
+    ```
+
+    ### Method: Executable `profiles.py` Script
+
+    Create an executable `profiles.py` script for dynamic generation (outputs JSON).
+    Example `~/.mux/dims/blockchain/profiles.py`:
+    ```python
+    #!/usr/bin/env python3
+    import json
+    import os
+
+    # Example: Generate profiles dynamically
+    networks = {
+        "mainnet": {
+            "RPC_URL": "https://mainnet.infura.io/v3/" + os.environ.get("INFURA_KEY", ""),
+            "CHAIN_ID": "1"
+        },
+        "sepolia": {
+            "RPC_URL": "https://sepolia.infura.io/v3/" + os.environ.get("INFURA_KEY", ""),
+            "CHAIN_ID": "11155111"
         }
+    }
 
-        # The script MUST output a JSON object to stdout
-        print(json.dumps(networks))
-        ```
-        *(Remember to make the script executable: `chmod +x ~/.mux/dims/blockchain/profiles.py`)*
+    # The script MUST output a JSON object to stdout
+    print(json.dumps(networks))
+    ```
+    *(Remember to make the script executable: `chmod +x ~/.mux/dims/blockchain/profiles.py`)*
+
 *   **Default Profile:** Set a default profile for a dimension using `mux set-default <dimension> <profile>` or interactively with `mux set-default`. This creates a `default.txt` file.
 
 *For detailed configuration options and advanced usage, please refer to the project documentation or code comments.*
