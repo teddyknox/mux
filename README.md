@@ -11,7 +11,7 @@ Mux makes it easy to configure and switch between different environment settings
 1.  **Installation:**
     ```bash
     # Clone the repository (if you haven't already)
-    # git clone <your-repo-url>
+    # git clone git@github.com:teddyknox/mux.git
     # cd mux-project
 
     # Install dependencies using Poetry
