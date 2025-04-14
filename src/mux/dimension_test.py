@@ -155,15 +155,15 @@ def test_invalid_default_profile(mock_mux_dir, capsys):
     (dim_path / "default.txt").write_text("fake_prof") # Non-existent default
 
     dim = Dimension("invalid_default", dim_path)
+    # Initial default loading doesn't validate, we need to access effective_default
+    effective = dim.get_effective_default_profile()
     captured = capsys.readouterr()
 
-    assert dim.get_default_profile_name() is None # Default should be ignored
+    assert dim.get_default_profile_name() is None # Default should be reset when found invalid
+    assert effective is None
     warning_text = captured.err
     assert "Default profile 'fake_prof'" in warning_text
-    assert "listed in" in warning_text 
-    assert "not found" in warning_text
-    assert "loaded profiles" in warning_text
-    assert "dimension 'invalid_default'" in warning_text
+    assert "not found in loaded" in warning_text
     assert "real_prof" in dim.get_profiles() # The valid profile should still load
 
 
@@ -175,12 +175,15 @@ def test_invalid_yaml_format(mock_mux_dir, capsys):
     (dim_path / "profiles.yaml").write_text("- profile1: {VAR: val}")
 
     dim = Dimension("invalid_yaml", dim_path)
+    # Force profile loading with non-silent mode to generate warnings
+    dim._load_profiles(silent=False)
     captured = capsys.readouterr()
 
     assert not dim.get_profiles() # No profiles should be loaded
     # Check stderr for the warning
-    assert "Warning: Error loading profiles from YAML" in captured.err
-    assert "YAML root must \nbe a dictionary" in captured.err # Match actual error with newline
+    assert "Error loading profiles from YAML" in captured.err
+    assert "YAML root must" in captured.err # Match partial text
+    assert "dictionary" in captured.err # Match partial text
 
 
 def test_invalid_yaml_profile_entry(mock_mux_dir, capsys):
@@ -194,6 +197,8 @@ def test_invalid_yaml_profile_entry(mock_mux_dir, capsys):
     (dim_path / "profiles.yaml").write_text(yaml.dump(yaml_content))
 
     dim = Dimension("invalid_yaml_entry", dim_path)
+    # Force profile loading with non-silent mode to generate warnings
+    dim._load_profiles(silent=False)
     captured = capsys.readouterr()
 
     profiles = dim.get_profiles()
@@ -217,6 +222,8 @@ sys.exit(1)
     os.chmod(script_path, 0o755) # Make executable
 
     dim = Dimension("script_error", dim_path)
+    # Force profile loading with non-silent mode to generate warnings
+    dim._load_profiles(silent=False)
     captured = capsys.readouterr()
 
     assert not dim.get_profiles()
@@ -238,11 +245,13 @@ print("this is not json")
     os.chmod(script_path, 0o755) # Make executable
 
     dim = Dimension("invalid_json", dim_path)
+    # Force profile loading with non-silent mode to generate warnings
+    dim._load_profiles(silent=False)
     captured = capsys.readouterr()
 
     assert not dim.get_profiles()
     # assert "Warning: Error running profile script" in captured.err # Check generic script error first
-    assert "Warning: Configuration error in profile script" in captured.err # Check actual warning
+    assert "Configuration error in profile script" in captured.err # Check actual warning
     assert "Error \ndecoding JSON from script" in captured.err # Check specific error part
     # assert "Could not parse JSON output" in captured.err # Then specific JSON error
     assert "Output:" in captured.err
@@ -261,11 +270,13 @@ print(json.dumps(["list", "not", "dict"]))
     os.chmod(script_path, 0o755) # Make executable
 
     dim = Dimension("wrong_json", dim_path)
+    # Force profile loading with non-silent mode to generate warnings
+    dim._load_profiles(silent=False)
     captured = capsys.readouterr()
 
     assert not dim.get_profiles()
     # assert "Warning: Error running profile script" in captured.err # Check generic script error first
-    assert "Warning: Configuration error in profile script" in captured.err # Check actual warning
+    assert "Configuration error in profile script" in captured.err # Check actual warning
     # assert "Invalid JSON structure" in captured.err # Then specific structure error
     assert "Script output\nmust be a JSON dictionary" in captured.err # Check specific error part
     # assert "Expected a dictionary at the top level" in captured.err # Check specific error

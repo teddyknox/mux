@@ -41,11 +41,11 @@ def print_info(message: str):
 # Recursive helper function to build the status tree
 def _build_status_tree(tree: Tree, dimension: 'Dimension', verbose: bool = False):
     """Recursively builds the Rich Tree for dimensions."""
-    active_profile = get_active_profile_from_env(dimension)
+    active_profile = dimension.get_active_profile_name()
     effective_default = dimension.get_effective_default_profile() # Method exists
-
+ 
     label = Text(dimension.name)
-
+ 
     status_parts = []
     if active_profile:
         status_parts.append(Text.from_markup(f"[bold green]active:[/] [green]{active_profile}[/]"))
@@ -55,20 +55,20 @@ def _build_status_tree(tree: Tree, dimension: 'Dimension', verbose: bool = False
              status_parts.append(Text.from_markup(f"[dim]default:[/] [dim]{effective_default}[/]"))
         elif active_profile and active_profile == effective_default:
              status_parts.append(Text.from_markup(f"[dim](default)[/]")) # Indicate active is also default
-
+ 
     if status_parts:
         label.append(" (")
         # Join Text objects manually with a separator
         assembled_text = Text(", ").join(status_parts)
         label.append(assembled_text) # Append the joined text
         label.append(")")
-
+ 
     # Add node for the current dimension
     branch = tree.add(label)
-
+ 
     # Add all available profiles if in verbose mode
     if verbose:
-        profiles = dimension.get_profiles()
+        profiles = dimension.get_profiles() # This now uses silent=True
         if profiles:
             profiles_branch = branch.add(Text("Profiles", style="dim cyan"))
             for profile_name in sorted(profiles.keys()):

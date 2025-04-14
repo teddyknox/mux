@@ -129,10 +129,15 @@ def load_profiles_from_script(script_path: Path, parent_profile: Optional[str] =
         print_warning(f"Error running profile script \n'{script_path}': {e}")
         return None
 
-def load_profiles_for_dimension(dim_path: Path, parent_profile: Optional[str] = None) -> Dict[str, Dict]:
+def load_profiles_for_dimension(dim_path: Path, parent_profile: Optional[str] = None, silent: bool = False) -> Dict[str, Dict]:
     """
     Detects and loads profiles for a given dimension path using the first available method.
     Order: Dynamic (script) > YAML (profiles.yaml) > Manual (profiles/*.env)
+    
+    Args:
+        dim_path: Path to the dimension directory
+        parent_profile: Optional parent profile name (for script execution)
+        silent: If True, suppresses informational warnings about loaded sources
     """
     profiles = None # Start with None to distinguish no source vs. empty source
     loaded_source = None # Track where profiles came from
@@ -179,9 +184,9 @@ def load_profiles_for_dimension(dim_path: Path, parent_profile: Optional[str] = 
 
 
     # Optionally print info about which source was used
-    if loaded_source:
+    if loaded_source and not silent:
         print_warning(f"Loaded profiles for '{dim_path.name}' from {loaded_source}.")
-    elif not profiles_py.exists() and not profiles_yaml.exists() and not profiles_dir.exists():
+    elif not profiles_py.exists() and not profiles_yaml.exists() and not profiles_dir.exists() and not silent:
         print_warning(f"No profile source found for dimension '{dim_path.name}'.")
 
     # Return the loaded profiles dict, or an empty dict if no source was found/loaded

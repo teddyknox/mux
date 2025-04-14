@@ -22,20 +22,31 @@ class Dimension:
         self.children: List['Dimension'] = []
         self._profiles: Dict[str, Dict[str, str]] = {}
         self._default_profile_name: Optional[str] = None
-        self._load_config()
+        self._profiles_loaded = False
+        self._default_loaded = False
+        # Only load the default during initialization, not the profiles
+        self._load_default()
 
     def _load_config(self):
         """Loads profiles and default settings for the dimension."""
         self._load_profiles()
         self._load_default()
 
-    def _load_profiles(self):
-        """Loads profiles using the centralized loader."""
+    def _load_profiles(self, silent: bool = False):
+        """Loads profiles using the centralized loader.
+        
+        Args:
+            silent: If True, suppresses informational warnings about loaded sources
+        """
+        # Skip if already loaded
+        if self._profiles_loaded:
+            return
+            
         loaded_profiles = None
         try:
             # Pass parent profile name if available for dynamic scripts
             parent_profile = self.parent.get_active_profile_name() if self.parent else None
-            loaded_profiles = load_profiles_for_dimension(self.path, parent_profile=parent_profile)
+            loaded_profiles = load_profiles_for_dimension(self.path, parent_profile=parent_profile, silent=silent)
         except Exception as e:
             # Catch any unexpected error during profile loading
             print_warning(f"Failed to load profiles for dimension '{self.name}' at '{self.path}': {e}")
@@ -43,21 +54,24 @@ class Dimension:
             
         # Ensure self._profiles is a dict, even if loading returned None or error occurred
         self._profiles = loaded_profiles if loaded_profiles is not None else {}
+        self._profiles_loaded = True
 
     def _load_default(self):
         """Loads the default profile name from default.txt."""
+        # Skip if already loaded
+        if self._default_loaded:
+            return
+            
         default_file = self.path / "default.txt"
         if default_file.is_file():
             try:
                 with open(default_file, 'r') as f:
                     self._default_profile_name = f.read().strip()
-                    # Validate that the default profile actually exists
-                    if self._default_profile_name not in self._profiles:
-                        print_warning(f"Default profile '{self._default_profile_name}' listed in {default_file} not found in loaded profiles for dimension '{self.name}'.")
-                        self._default_profile_name = None # Reset if invalid
+                    # Validation of default profile occurs later, when profiles are loaded
             except Exception as e:
                 print_warning(f"Could not read default file {default_file}: {e}")
                 self._default_profile_name = None
+        self._default_loaded = True
 
     def get_dim_path_str(self) -> str:
         """Returns the full path string for this dimension (e.g., 'root/child')."""
@@ -70,11 +84,14 @@ class Dimension:
 
     def get_profiles(self) -> Dict[str, Dict[str, str]]:
         """Returns the loaded profiles."""
+        # Ensure profiles are loaded with silent=True since we're just retrieving information
+        if not self._profiles:
+            self._load_profiles(silent=True)
         return self._profiles.copy() # Return a copy to prevent external modification
 
     def get_profile_names(self) -> List[str]:
         """Returns a list of available profile names."""
-        return list(self._profiles.keys())
+        return list(self.get_profiles().keys())
 
     def get_default_profile_name(self) -> Optional[str]:
         """Returns the default profile name, if set."""
@@ -89,7 +106,7 @@ class Dimension:
         # Ensure profiles are loaded if they haven't been already
         # This might happen if set_default is called before get_profiles
         if not self._profiles:
-            self._load_profiles()
+            self._load_profiles() # Don't silence here since this is a user-initiated action
             
         if profile_name not in self._profiles:
             # Use print_error helper function or print directly to stderr
@@ -111,9 +128,9 @@ class Dimension:
             return False
 
     def get_active_profile_name(self) -> Optional[str]:
-         """Gets the currently active profile name from the environment state."""
-         # Use the imported state function
-         return get_active_profile(self)
+        """Gets the currently active profile name from the environment state."""
+        # Use the imported state function with the dimension name string
+        return get_active_profile(self.name)
 
     def get_user_default_profile(self) -> Optional[str]:
         """Reads the user default profile from ~/.mux/defaults/."""
@@ -135,12 +152,18 @@ class Dimension:
 
     def get_effective_default_profile(self) -> Optional[str]:
         """Returns the source default if valid."""
+        # Ensure profiles are loaded silently since we're just checking defaults
+        if not self._profiles_loaded:
+            self._load_profiles(silent=True)
+            
         source_default = self.get_default_profile_name() # From default.txt
         if source_default and source_default in self._profiles:
             return source_default
         elif source_default:
              # Warn if source default exists but profile doesn't
-             print_warning(f"Source default profile '{source_default}' for dimension '{self.get_dim_path_str()}' not found. Ignoring.")
+             print_warning(f"Default profile '{source_default}' listed in default file not found in loaded profiles for dimension '{self.name}'.")
+             # Reset the default profile if it's invalid
+             self._default_profile_name = None
 
         return None # No valid default found
 

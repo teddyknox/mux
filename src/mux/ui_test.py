@@ -41,7 +41,12 @@ class MockDimension:
 
     def get_effective_default_profile(self) -> Optional[str]:
         return self._effective_default
-
+        
+    def get_active_profile_name(self) -> Optional[str]:
+        """Mocked implementation that will be patched in tests."""
+        from mux.ui import get_active_profile_from_env
+        return get_active_profile_from_env(self)
+        
     # Make it iterable for sorting
     def __lt__(self, other):
         return self.name < other.name
