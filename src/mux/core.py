@@ -65,6 +65,10 @@ class Mux:
         selected_dim_path = dim_path_str
         selected_profile = profile_name
         
+        # Flag to determine if we should offer hierarchical selection
+        # Skip hierarchical selection if both dimension and profile were explicitly provided
+        interactive_mode = not (selected_dim_path is not None and selected_profile is not None)
+        
         try:
             # --- Select Dimension (if needed) --- 
             if selected_dim_path is None:
@@ -108,7 +112,7 @@ class Mux:
                 # Should not happen if selected via fzf
                 raise ProfileNotFoundError(selected_profile, selected_dim_path)
         
-            # --- Generate Deactivation Commands (Old Profile + Children) --- 
+            # --- Generate Deactivation Commands (Old Profile) --- 
             all_commands = []
             old_profile_name = get_active_profile_from_env(dim) # Check currently active for this specific dim
             
@@ -122,9 +126,11 @@ class Mux:
                 deactivate_commands = generate_deactivate_commands(dim)
                 all_commands.extend(deactivate_commands)
             
-            # 2. Deactivate all child dimensions recursively
-            children_to_deactivate = self._get_all_children(dim)
-            for child_dim in children_to_deactivate:
+            # 2. Get all child dimensions
+            children_to_process = self._get_all_children(dim)
+            
+            # Deactivate all child dimensions recursively first
+            for child_dim in children_to_process:
                 if get_active_profile_from_env(child_dim):
                     print_info(f"Deactivating child dimension '{child_dim.get_dim_path_str()}' due to parent switch.")
                     deactivate_commands = generate_deactivate_commands(child_dim)
@@ -142,8 +148,67 @@ class Mux:
             except Exception as e:
                 raise MuxError(f"Failed to generate activation commands for profile '{selected_profile}' in '{selected_dim_path}': {e}")
 
+            # --- Prompt for child dimension profiles if in interactive mode and there are children ---
+            child_dimension_info = []
+            
+            if interactive_mode and children_to_process:
+                print_info(f"\nParent dimension '{selected_dim_path}' switched to '{selected_profile}'.")
+                print_info("Would you like to activate profiles for child dimensions?")
+                
+                for child_dim in children_to_process:
+                    child_dim_path = child_dim.get_dim_path_str()
+                    child_profiles = child_dim.get_profiles()
+                    
+                    if not child_profiles:
+                        print_info(f"Child dimension '{child_dim_path}' has no profiles.")
+                        continue
+                    
+                    # Get the default profile for this child dimension
+                    child_default = child_dim.get_effective_default_profile()
+                    
+                    # Ask user to select profile for this child dimension
+                    print_info(f"\nSelecting profile for child dimension '{child_dim_path}':")
+                    child_profile_options = sorted(list(child_profiles.keys()))
+                    
+                    # Add an option to skip this child dimension
+                    child_profile_options.append("⏭️  Skip (do not activate)")
+                    
+                    selected_child_profile = run_fzf(
+                        child_profile_options, 
+                        f"Select Profile for '{child_dim_path}' (or skip)",
+                        child_default  # Highlight default profile
+                    )
+                    
+                    # Check if user selected "Skip" or canceled
+                    if selected_child_profile is None or selected_child_profile == "⏭️  Skip (do not activate)":
+                        print_info(f"Skipping activation for '{child_dim_path}'.")
+                        continue
+                    
+                    # Validate the selected profile exists for this child
+                    if selected_child_profile not in child_profiles:
+                        print_warning(f"Profile '{selected_child_profile}' not found for dimension '{child_dim_path}'. Skipping.")
+                        continue
+                    
+                    # Generate activation commands for this child dimension
+                    try:
+                        child_activate_commands = generate_activate_commands(child_dim, selected_child_profile)
+                        all_commands.extend(child_activate_commands)
+                        child_dimension_info.append({
+                            "dim_path": child_dim_path,
+                            "profile": selected_child_profile
+                        })
+                    except Exception as e:
+                        print_warning(f"Failed to activate '{selected_child_profile}' for '{child_dim_path}': {e}")
+
             # --- Display Information --- 
             display_show_table(selected_dim_path, selected_profile, new_env)
+            
+            # Display child dimension information
+            for child_info in child_dimension_info:
+                child_dim = self.get_dimension(child_info["dim_path"])
+                child_env = child_dim.get_env_vars(child_info["profile"])
+                print_info(f"\nActivated child dimension:")
+                display_show_table(child_info["dim_path"], child_info["profile"], child_env)
             
             # --- Print to stdout --- 
             # Filter out empty strings and join with semicolons for shell execution
