@@ -12,17 +12,41 @@ Mux makes it easy to configure and switch between different environment settings
 
 ## Quick Start
 
-1.  **Installation:**
+1.  **Install Prerequisites:**
+    
+    **Install poetry and pipx (dependency management):**
+    ```bash
+    # macOS
+    brew install poetry pipx
+    
+    # Linux (Debian/Ubuntu)
+    curl -sSL https://install.python-poetry.org | python3 -
+    pip install pipx
+    ```
+    
+    **Install fzf (fuzzy finder):**
+    ```bash
+    # macOS
+    brew install fzf
+    
+    # Linux (Debian/Ubuntu)
+    sudo apt-get install fzf
+    ```
+
+2.  **Installation:**
     ```bash
     # Clone the repository (if you haven't already)
-    # git clone git@github.com:teddyknox/mux.git
-    # cd mux-project
+    git clone git@github.com:teddyknox/mux.git
+    cd mux
 
     # Install dependencies using Poetry
     poetry install
+    
+    # Use pipx to install globally and make the 'mux' command available in your PATH.
+    pipx install -e .
     ```
 
-2.  **Initialize Configuration:**
+3.  **Initialize Configuration:**
     Create the basic Mux setup in your home directory:
     ```bash
     mux init
@@ -31,7 +55,7 @@ Mux makes it easy to configure and switch between different environment settings
     ```
     This creates the `~/.mux/dims/` directory where you'll define your dimensions and profiles.
 
-3.  **Shell Integration (Essential for `switch`):**
+4.  **Shell Integration (Essential for `switch`):**
     Commands like `mux switch` work by printing shell commands (`export`, `unset`). To make them affect your current shell, you **must** evaluate their output.
 
     Add the Mux hook to your shell configuration file (`~/.zshrc`, `~/.bashrc`, `~/.config/fish/config.fish`):
@@ -42,7 +66,7 @@ Mux makes it easy to configure and switch between different environment settings
 
     Restart your shell or source your config file (e.g., `source ~/.zshrc`). This also enables **automatic profile switching** based on `.muxrc` files in your project directories.
 
-4.  **Basic Usage:**
+5.  **Basic Usage:**
     *   **See current status:** `mux status`
     *   **Select profiles interactively:** `mux switch` (Uses `fzf`. The hook will apply changes on the next prompt/directory change.)
     *   **Select a specific profile:** `mux switch <dimension_path> <profile_name>` (e.g., `mux switch kubernetes dev-cluster`. The hook applies the change.)
