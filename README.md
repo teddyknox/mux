@@ -60,7 +60,9 @@ Mux makes it easy to configure and switch between different environment settings
 
 ## Configuration Overview
 
-*   **Profiles:** Defined inside dimension directories (`~/.mux/dims/<dimension>/`). Mux supports:
+*   **Profiles:** Defined inside dimension directories (`~/.mux/dims/<dimension>/`).
+    *(Mux uses the first method it finds in the order: script > YAML > .env files)*
+    Mux supports:
     *   Simple `.env` files in a `profiles/` subdirectory (e.g., `profiles/dev.env`).
         Example `~/.mux/dims/kubernetes/profiles/dev.env`:
         ```dotenv
@@ -105,7 +107,6 @@ Mux makes it easy to configure and switch between different environment settings
         print(json.dumps(networks))
         ```
         *(Remember to make the script executable: `chmod +x ~/.mux/dims/blockchain/profiles.py`)*
-    *(Mux uses the first method it finds in the order: script > YAML > .env files)*
 *   **Default Profile:** Set a default profile for a dimension using `mux set-default <dimension> <profile>` or interactively with `mux set-default`. This creates a `default.txt` file.
 
 *For detailed configuration options and advanced usage, please refer to the project documentation or code comments.*
