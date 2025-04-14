@@ -47,14 +47,17 @@ def _build_status_tree(tree: Tree, dimension: 'Dimension', verbose: bool = False
     label = Text(dimension.name)
  
     status_parts = []
+    # Always show active status, even if none
     if active_profile:
         status_parts.append(Text.from_markup(f"[bold green]active:[/] [green]{active_profile}[/]"))
+    else:
+        status_parts.append(Text.from_markup(f"[bold green]active:[/] [green]none[/]"))
+    
+    # Always show default if it exists
     if effective_default:
-        # Only show default if it's different from active or if nothing is active
-        if not active_profile or active_profile != effective_default:
-             status_parts.append(Text.from_markup(f"[dim]default:[/] [dim]{effective_default}[/]"))
-        elif active_profile and active_profile == effective_default:
-             status_parts.append(Text.from_markup(f"[dim](default)[/]")) # Indicate active is also default
+        status_parts.append(Text.from_markup(f"[dim]default:[/] [dim]{effective_default}[/]"))
+    else:
+        status_parts.append(Text.from_markup(f"[dim]default:[/] [dim]none[/]"))
  
     if status_parts:
         label.append(" (")
@@ -72,14 +75,17 @@ def _build_status_tree(tree: Tree, dimension: 'Dimension', verbose: bool = False
         if profiles:
             profiles_branch = branch.add(Text("Profiles", style="dim cyan"))
             for profile_name in sorted(profiles.keys()):
-                if profile_name == active_profile:
-                    # Highlight active profile
-                    profile_label = Text.from_markup(f"[bold green]{profile_name}[/bold green] [dim](active)[/dim]")
-                elif profile_name == effective_default and profile_name != active_profile:
-                    # Highlight default profile
-                    profile_label = Text.from_markup(f"[dim yellow]{profile_name}[/dim yellow] [dim](default)[/dim]")
+                if profile_name == active_profile and profile_name == effective_default:
+                    # Active & default profile - keep the green color
+                    profile_label = Text(profile_name, style="bold green")
+                elif profile_name == active_profile:
+                    # Active profile - keep the green color
+                    profile_label = Text(profile_name, style="bold green")
+                elif profile_name == effective_default:
+                    # Default profile - keep the yellow color
+                    profile_label = Text(profile_name, style="dim yellow")
                 else:
-                    # Regular profile
+                    # Regular profile - normal text
                     profile_label = Text(profile_name)
                 profiles_branch.add(profile_label)
 
